@@ -1,5 +1,6 @@
-![alt text](/screenshot.png)
-
+![alt text](./public/image.png)
+![alt text](./public/screenshot.png)
+![alt text](./public/image-1.png)
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
 ## Getting Started
