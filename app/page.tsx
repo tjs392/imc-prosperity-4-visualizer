@@ -276,10 +276,10 @@ export default function Home() {
               </select>
               <button
                 onClick={() => setDashboardInfoOpen(true)}
-                className="border border-neutral-600 bg-[#2a2d31] text-neutral-300 hover:text-neutral-100 hover:border-neutral-400 px-2 py-1 text-xs font-mono transition-colors flex-none"
-                aria-label="Open reference panel"
+                className="border border-neutral-600 bg-[#2a2d31] text-neutral-300 hover:text-neutral-100 hover:border-neutral-400 px-2 py-1 text-xs transition-colors flex-none"
+                aria-label="Open glossary"
               >
-                info
+                glossary
               </button>
             </>
           )}
