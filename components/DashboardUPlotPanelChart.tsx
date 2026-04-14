@@ -195,7 +195,7 @@ export default function DashboardUPlotPanelChart({
   }, [resetSignal]);
 
   return (
-    <div className="border border-neutral-600 bg-[#2a2d31] relative min-w-0">
+    <div className="border border-neutral-600 bg-[#2a2d31] relative min-w-0 flex-none">
       <div className="flex items-center justify-between border-b border-neutral-600 px-3 py-1.5">
         <span className="text-neutral-100 text-xs font-semibold">{label}</span>
       </div>

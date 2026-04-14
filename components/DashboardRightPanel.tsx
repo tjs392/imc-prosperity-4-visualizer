@@ -3,7 +3,7 @@
 import { ParsedLog } from "@/lib/types";
 import DashboardLogViewer from "@/components/DashboardLogViewer";
 import type { Normalizer } from "@/components/DashboardUPlotChart";
-import type { LevelKey, TradeKey, OrderKey } from "@/components/DashboardView";
+import type { LevelKey, TradeKey, OrderKey, PnlStats } from "@/components/DashboardView";
 
 type TradeShape = "square" | "triangleUp" | "triangleDown";
 
@@ -78,6 +78,7 @@ type Props = {
   maxTradeQty: number;
   onQtyMinChange: (n: number) => void;
   onQtyMaxChange: (n: number | null) => void;
+  pnlStats: PnlStats;
   hoveredTime: number | null;
 };
 
@@ -98,6 +99,7 @@ export default function DashboardRightPanel({
   maxTradeQty,
   onQtyMinChange,
   onQtyMaxChange,
+  pnlStats,
   hoveredTime,
 }: Props) {
   const products = parsed?.products ?? [];
@@ -327,12 +329,101 @@ export default function DashboardRightPanel({
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 flex flex-col">
-        <DashboardLogViewer
-          sandbox={parsed?.sandbox ?? []}
-          hoveredTime={hoveredTime}
-        />
+      <div className="flex-1 min-h-0 grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] border-t border-neutral-600">
+        <div className="min-h-0 min-w-0 border-r border-neutral-600 flex flex-col">
+          <StatsSection stats={pnlStats} />
+        </div>
+        <div className="min-h-0 min-w-0 flex flex-col">
+          <DashboardLogViewer
+            sandbox={parsed?.sandbox ?? []}
+            hoveredTime={hoveredTime}
+          />
+        </div>
       </div>
+    </div>
+  );
+}
+
+function StatsSection({ stats }: { stats: PnlStats }) {
+  const fmt = (n: number) =>
+    n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  const fmtSigned = (n: number) => (n >= 0 ? "+" : "") + fmt(n);
+  const calmarStr =
+    stats.calmar === null
+      ? "-"
+      : !Number.isFinite(stats.calmar)
+      ? "inf"
+      : fmt(stats.calmar);
+  const pnlColor =
+    stats.finalPnl > 0
+      ? "#a3e635"
+      : stats.finalPnl < 0
+      ? "#ef4444"
+      : "#d4d4d4";
+
+  return (
+    <div className="h-full flex flex-col min-h-0">
+      <div className="flex items-center border-b border-neutral-600 px-3 py-1.5 flex-none">
+        <span className="text-neutral-100 text-xs font-semibold">Stats</span>
+      </div>
+      <div className="flex-1 overflow-auto px-3 py-3 space-y-3 text-[11px]">
+        <Stat label="Final PnL" value={fmtSigned(stats.finalPnl)} color={pnlColor} />
+        <Stat label="Peak PnL" value={fmtSigned(stats.peakPnl)} />
+        <Stat
+          label="Peak at"
+          value={stats.peakAt === null ? "-" : `ts ${stats.peakAt}`}
+          muted
+        />
+        <div className="border-t border-neutral-700 pt-2">
+          <Stat
+            label="Max Drawdown"
+            value={stats.maxDrawdown > 0 ? `-${fmt(stats.maxDrawdown)}` : "0"}
+            color={stats.maxDrawdown > 0 ? "#ef4444" : undefined}
+          />
+          <Stat
+            label="DD at"
+            value={stats.drawdownAt === null ? "-" : `ts ${stats.drawdownAt}`}
+            muted
+          />
+          <Stat
+            label="Time in DD"
+            value={`${stats.timeInDrawdownPct.toFixed(1)}%`}
+          />
+        </div>
+        <div className="border-t border-neutral-700 pt-2">
+          <Stat label="Calmar" value={calmarStr} />
+          <div className="text-neutral-600 text-[9px] mt-1 leading-snug">
+            Calmar = Final PnL / Max Drawdown. Higher is better. A negative
+            value means the session finished below its starting point.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  color,
+  muted,
+}: {
+  label: string;
+  value: string;
+  color?: string;
+  muted?: boolean;
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-2 py-0.5">
+      <span className="text-neutral-500 text-[10px] uppercase tracking-wide">
+        {label}
+      </span>
+      <span
+        className={`font-mono ${muted ? "text-[10px]" : "text-[12px]"}`}
+        style={{ color: color ?? (muted ? "#737373" : "#f5f5f5") }}
+      >
+        {value}
+      </span>
     </div>
   );
 }

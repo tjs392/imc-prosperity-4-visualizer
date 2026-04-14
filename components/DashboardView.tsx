@@ -12,6 +12,10 @@ type Props = {
   active: boolean;
   parsed: ParsedLog | null;
   loading: boolean;
+  selectedProduct: string | null;
+  onSelectProduct: (p: string | null) => void;
+  infoOpen: boolean;
+  onInfoOpenChange: (v: boolean) => void;
 };
 
 export type LevelKey = "bid1" | "bid2" | "bid3" | "ask1" | "ask2" | "ask3" | "mid";
@@ -38,12 +42,74 @@ function computePositions(
   return out;
 }
 
-export default function DashboardView({ active, parsed, loading }: Props) {
-  const [selectedProduct, setSelectedProduct] = useState<string | null>(null);
+export type PnlStats = {
+  finalPnl: number;
+  peakPnl: number;
+  peakAt: number | null;
+  maxDrawdown: number;
+  drawdownAt: number | null;
+  timeInDrawdownPct: number;
+  calmar: number | null;
+};
+
+function computePnlStats(
+  pnlData: { time: number; value: number }[]
+): PnlStats {
+  if (pnlData.length === 0) {
+    return {
+      finalPnl: 0,
+      peakPnl: 0,
+      peakAt: null,
+      maxDrawdown: 0,
+      drawdownAt: null,
+      timeInDrawdownPct: 0,
+      calmar: null,
+    };
+  }
+  let peak = pnlData[0].value;
+  let peakAt: number | null = pnlData[0].time;
+  let maxDd = 0;
+  let ddAt: number | null = null;
+  let inDdCount = 0;
+  for (const p of pnlData) {
+    if (p.value > peak) {
+      peak = p.value;
+      peakAt = p.time;
+    }
+    const dd = peak - p.value;
+    if (dd > maxDd) {
+      maxDd = dd;
+      ddAt = p.time;
+    }
+    if (p.value < peak) inDdCount++;
+  }
+  const finalPnl = pnlData[pnlData.length - 1].value;
+  const calmar = maxDd > 0 ? finalPnl / maxDd : null;
+  return {
+    finalPnl,
+    peakPnl: peak,
+    peakAt,
+    maxDrawdown: maxDd,
+    drawdownAt: ddAt,
+    timeInDrawdownPct: (inDdCount / pnlData.length) * 100,
+    calmar,
+  };
+}
+
+export default function DashboardView({
+  active,
+  parsed,
+  loading,
+  selectedProduct,
+  onSelectProduct,
+  infoOpen,
+  onInfoOpenChange,
+}: Props) {
+  const setSelectedProduct = onSelectProduct;
+  const setInfoOpen = onInfoOpenChange;
   const [resetSignal, setResetSignal] = useState(0);
   const [hoveredTime, setHoveredTime] = useState<number | null>(null);
   const [normalizer, setNormalizer] = useState<Normalizer>("none");
-  const [infoOpen, setInfoOpen] = useState(false);
   const [qtyMin, setQtyMin] = useState(0);
   const [qtyMax, setQtyMax] = useState<number | null>(null);
   const [visibleLevels, setVisibleLevels] = useState<Record<LevelKey, boolean>>({
@@ -116,6 +182,8 @@ export default function DashboardView({ active, parsed, loading }: Props) {
     return computePositions(parsed.trades, productObj.product);
   }, [parsed, productObj]);
 
+  const pnlStats = useMemo(() => computePnlStats(pnlData), [pnlData]);
+
   const maxTradeQty = useMemo(() => {
     if (!parsed || !productObj) return 0;
     let m = 0;
@@ -134,53 +202,10 @@ export default function DashboardView({ active, parsed, loading }: Props) {
 
   return (
     <div
-      className="h-[calc(100vh-136px)] overflow-y-auto overflow-x-hidden"
+      className="h-[calc(100vh-44px)] overflow-y-auto overflow-x-hidden"
       style={{ display: active ? undefined : "none" }}
     >
       <div className="p-2 flex flex-col h-full min-h-0 min-w-0">
-        <div className="flex items-center justify-between border-b border-neutral-700 pb-1.5 mb-2 flex-none">
-          <div className="flex items-center gap-3 flex-wrap">
-            <h2 className="text-neutral-100 font-semibold text-[13px]">
-              Dashboard
-            </h2>
-            {productObj && (
-              <span className="text-neutral-500 text-xs">
-                {productObj.rows.length} ticks
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-neutral-400 text-xs">Product</span>
-            <select
-              value={selectedProduct ?? ""}
-              onChange={(e) => setSelectedProduct(e.target.value)}
-              disabled={!parsed || parsed.products.length === 0}
-              className="border border-neutral-600 bg-[#2a2d31] text-neutral-200 px-2 py-1 text-xs focus:border-neutral-300 focus:outline-none disabled:text-neutral-600"
-            >
-              {!parsed || parsed.products.length === 0 ? (
-                <option>-</option>
-              ) : (
-                parsed.products.map((p) => (
-                  <option
-                    key={p.product}
-                    value={p.product}
-                    className="bg-[#2a2d31]"
-                  >
-                    {p.product}
-                  </option>
-                ))
-              )}
-            </select>
-            <button
-              onClick={() => setInfoOpen(true)}
-              className="border border-neutral-600 bg-[#2a2d31] text-neutral-300 hover:text-neutral-100 hover:border-neutral-400 px-2 py-1 text-xs font-mono transition-colors"
-              aria-label="Open reference panel"
-            >
-              info
-            </button>
-          </div>
-        </div>
-
         {!parsed && !loading && (
           <p className="text-neutral-500 text-xs">No log loaded.</p>
         )}
@@ -189,75 +214,71 @@ export default function DashboardView({ active, parsed, loading }: Props) {
         )}
 
         {parsed && productObj && (
-          <>
-            <div className="flex flex-col gap-2 flex-1 min-h-0 min-w-0">
-              <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-2 flex-1 min-h-0 min-w-0">
-                <DashboardUPlotChart
-                  rows={activityRows}
-                  trades={parsed.trades}
-                  sandbox={parsed.sandbox}
-                  product={productObj.product}
-                  label={`Order Book - ${productObj.product}`}
-                  minHeight={240}
-                  visibleLevels={visibleLevels}
-                  visibleTrades={visibleTrades}
-                  visibleOrders={visibleOrders}
-                  normalizer={normalizer}
-                  qtyFilter={{
-                    min: qtyMin,
-                    max: qtyMax === null ? Infinity : qtyMax,
-                  }}
-                  resetSignal={resetSignal}
-                  onResetRequest={() => setResetSignal((n) => n + 1)}
-                  onHoverTime={setHoveredTime}
-                />
-
-                <div className="h-full min-h-0 min-w-0 hidden lg:block">
-                  <DashboardRightPanel
-                    parsed={parsed}
-                    selectedProduct={selectedProduct}
-                    onSelectProduct={setSelectedProduct}
-                    normalizer={normalizer}
-                    onSelectNormalizer={setNormalizer}
-                    visibleLevels={visibleLevels}
-                    onToggleLevel={toggleLevel}
-                    visibleTrades={visibleTrades}
-                    onToggleTrade={toggleTrade}
-                    visibleOrders={visibleOrders}
-                    onToggleOrder={toggleOrder}
-                    qtyMin={qtyMin}
-                    qtyMax={qtyMax}
-                    maxTradeQty={maxTradeQty}
-                    onQtyMinChange={setQtyMin}
-                    onQtyMaxChange={setQtyMax}
-                    hoveredTime={hoveredTime}
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2 flex-none min-w-0">
-                <DashboardUPlotPanelChart
-                  data={pnlData}
-                  label={`Profit / Loss - ${productObj.product}`}
-                  color="#a3e635"
-                  valueLabel="pnl"
-                  height={120}
-                  formatValue={(v) => v.toFixed(0)}
-                  resetSignal={resetSignal}
-                />
-                <DashboardUPlotPanelChart
-                  data={positionData}
-                  label={`Position - ${productObj.product}`}
-                  color="#60a5fa"
-                  valueLabel="pos"
-                  step
-                  height={120}
-                  formatValue={(v) => v.toFixed(0)}
-                  resetSignal={resetSignal}
-                />
-              </div>
+          <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,6fr)_minmax(0,4fr)] gap-2 flex-1 min-h-0 min-w-0">
+            <div className="flex flex-col gap-2 min-h-0 min-w-0">
+              <DashboardUPlotChart
+                rows={activityRows}
+                trades={parsed.trades}
+                sandbox={parsed.sandbox}
+                product={productObj.product}
+                label={`Order Book - ${productObj.product}`}
+                minHeight={240}
+                visibleLevels={visibleLevels}
+                visibleTrades={visibleTrades}
+                visibleOrders={visibleOrders}
+                normalizer={normalizer}
+                qtyFilter={{
+                  min: qtyMin,
+                  max: qtyMax === null ? Infinity : qtyMax,
+                }}
+                resetSignal={resetSignal}
+                onResetRequest={() => setResetSignal((n) => n + 1)}
+                onHoverTime={setHoveredTime}
+              />
+              <DashboardUPlotPanelChart
+                data={pnlData}
+                label={`Profit / Loss - ${productObj.product}`}
+                color="#a3e635"
+                valueLabel="pnl"
+                height={120}
+                formatValue={(v) => v.toFixed(0)}
+                resetSignal={resetSignal}
+              />
+              <DashboardUPlotPanelChart
+                data={positionData}
+                label={`Position - ${productObj.product}`}
+                color="#60a5fa"
+                valueLabel="pos"
+                step
+                height={120}
+                formatValue={(v) => v.toFixed(0)}
+                resetSignal={resetSignal}
+              />
             </div>
-          </>
+
+            <div className="h-full min-h-0 min-w-0 hidden lg:block">
+              <DashboardRightPanel
+                parsed={parsed}
+                selectedProduct={selectedProduct}
+                onSelectProduct={setSelectedProduct}
+                normalizer={normalizer}
+                onSelectNormalizer={setNormalizer}
+                visibleLevels={visibleLevels}
+                onToggleLevel={toggleLevel}
+                visibleTrades={visibleTrades}
+                onToggleTrade={toggleTrade}
+                visibleOrders={visibleOrders}
+                onToggleOrder={toggleOrder}
+                qtyMin={qtyMin}
+                qtyMax={qtyMax}
+                maxTradeQty={maxTradeQty}
+                onQtyMinChange={setQtyMin}
+                onQtyMaxChange={setQtyMax}
+                pnlStats={pnlStats}
+                hoveredTime={hoveredTime}
+              />
+            </div>
+          </div>
         )}
       </div>
       <DashboardInfoPanel open={infoOpen} onClose={() => setInfoOpen(false)} />

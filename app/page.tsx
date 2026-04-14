@@ -71,6 +71,8 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [chartsProducts, setChartsProducts] = useState<string[]>([]);
   const [tablesProducts, setTablesProducts] = useState<string[]>([]);
+  const [dashboardProduct, setDashboardProduct] = useState<string | null>(null);
+  const [dashboardInfoOpen, setDashboardInfoOpen] = useState(false);
 
   const toggleChartsProduct = (p: string) => {
     setChartsProducts((prev) => {
@@ -189,88 +191,113 @@ export default function Home() {
   return (
     <main className="min-h-screen bg-[#2a2d31] text-neutral-200 font-sans text-sm">
       <header className="sticky top-0 z-10 border-b border-neutral-600 bg-[#2a2d31]">
-        <div className="flex items-center justify-between border-b border-neutral-700 px-5 py-2">
-          <div className="flex items-center gap-3">
-            <span className="text-neutral-100 font-semibold text-[13px]">
-              Prosperity 4 Log Visualizer
-            </span>
-            <span className="text-neutral-600">·</span>
-            <span className="text-neutral-500 text-xs">v0.1</span>
+        <div className="flex items-center gap-3 px-5 py-2 min-w-0">
+          <span className="text-neutral-100 font-semibold text-[13px] flex-none">
+            Prosperity 4
+          </span>
+          <span className="text-neutral-600 flex-none">|</span>
+          <div className="flex items-center gap-1.5 flex-none">
+            <button
+              onClick={() => setTab("dashboard")}
+              className={`border px-2 py-1 text-xs transition-colors ${
+                tab === "dashboard"
+                  ? "border-neutral-300 bg-neutral-700 text-neutral-100"
+                  : "border-neutral-600 bg-[#2a2d31] text-neutral-500 hover:text-neutral-200"
+              }`}
+            >
+              Dashboard
+            </button>
+            <button
+              onClick={() => setTab("logs")}
+              className={`border px-2 py-1 text-xs transition-colors ${
+                tab === "logs"
+                  ? "border-neutral-300 bg-neutral-700 text-neutral-100"
+                  : "border-neutral-600 bg-[#2a2d31] text-neutral-500 hover:text-neutral-200"
+              }`}
+            >
+              Logs
+            </button>
+            <button
+              onClick={() => setTab("historical")}
+              className={`border px-2 py-1 text-xs transition-colors ${
+                tab === "historical"
+                  ? "border-neutral-300 bg-neutral-700 text-neutral-100"
+                  : "border-neutral-600 bg-[#2a2d31] text-neutral-500 hover:text-neutral-200"
+              }`}
+            >
+              Historical
+            </button>
           </div>
-          <div className="flex items-center gap-3 text-neutral-500 text-xs">
+          {(tab === "logs" || tab === "dashboard") && (
+            <>
+              <span className="text-neutral-600 flex-none">|</span>
+              <span className="text-neutral-400 text-xs flex-none">Log</span>
+              <select
+                value={selected}
+                onChange={(e) => setSelected(e.target.value)}
+                disabled={logs.length === 0}
+                className="border border-neutral-600 bg-[#2a2d31] text-neutral-200 px-2 py-1 text-xs focus:border-neutral-300 focus:outline-none disabled:text-neutral-600 flex-none max-w-[220px] truncate"
+              >
+                {logs.length === 0 ? (
+                  <option>No logs</option>
+                ) : (
+                  logs.map((name) => (
+                    <option key={name} value={name} className="bg-[#2a2d31]">
+                      {name}
+                    </option>
+                  ))
+                )}
+              </select>
+            </>
+          )}
+          {tab === "dashboard" && (
+            <>
+              <span className="text-neutral-600 flex-none">|</span>
+              <span className="text-neutral-400 text-xs flex-none">Product</span>
+              <select
+                value={dashboardProduct ?? ""}
+                onChange={(e) => setDashboardProduct(e.target.value)}
+                disabled={!parsed || parsed.products.length === 0}
+                className="border border-neutral-600 bg-[#2a2d31] text-neutral-200 px-2 py-1 text-xs focus:border-neutral-300 focus:outline-none disabled:text-neutral-600 flex-none"
+              >
+                {!parsed || parsed.products.length === 0 ? (
+                  <option>-</option>
+                ) : (
+                  parsed.products.map((p) => (
+                    <option
+                      key={p.product}
+                      value={p.product}
+                      className="bg-[#2a2d31]"
+                    >
+                      {p.product}
+                    </option>
+                  ))
+                )}
+              </select>
+              <button
+                onClick={() => setDashboardInfoOpen(true)}
+                className="border border-neutral-600 bg-[#2a2d31] text-neutral-300 hover:text-neutral-100 hover:border-neutral-400 px-2 py-1 text-xs font-mono transition-colors flex-none"
+                aria-label="Open reference panel"
+              >
+                info
+              </button>
+            </>
+          )}
+          <div className="flex-1 min-w-0" />
+          <div className="flex items-center gap-2 text-neutral-500 text-xs flex-none">
             <span>
-              Status:{" "}
               <span className={loading ? "text-neutral-300" : "text-neutral-100"}>
                 {loading ? "Loading" : "Ready"}
               </span>
             </span>
-            <span className="text-neutral-600">·</span>
-            <span>
-              Log: <span className="text-neutral-200">{selected || "-"}</span>
-            </span>
-            <span className="text-neutral-600">·</span>
+            <span className="text-neutral-600">|</span>
             <span className="font-mono">{timeStr}Z</span>
           </div>
         </div>
-
-        <div className="flex items-center gap-3 px-5 py-2 border-b border-neutral-700">
-          <button
-            onClick={() => setTab("dashboard")}
-            className={`border px-3 py-1 text-xs transition-colors ${
-              tab === "dashboard"
-                ? "border-neutral-300 bg-neutral-700 text-neutral-100"
-                : "border-neutral-600 bg-[#2a2d31] text-neutral-500 hover:text-neutral-200"
-            }`}
-          >
-            Dashboard
-          </button>
-          <button
-            onClick={() => setTab("logs")}
-            className={`border px-3 py-1 text-xs transition-colors ${
-              tab === "logs"
-                ? "border-neutral-300 bg-neutral-700 text-neutral-100"
-                : "border-neutral-600 bg-[#2a2d31] text-neutral-500 hover:text-neutral-200"
-            }`}
-          >
-            Logs
-          </button>
-          <button
-            onClick={() => setTab("historical")}
-            className={`border px-3 py-1 text-xs transition-colors ${
-              tab === "historical"
-                ? "border-neutral-300 bg-neutral-700 text-neutral-100"
-                : "border-neutral-600 bg-[#2a2d31] text-neutral-500 hover:text-neutral-200"
-            }`}
-          >
-            Historical
-          </button>
-        </div>
-
-        {(tab === "logs" || tab === "dashboard") && (
-          <div className="flex items-center gap-3 px-5 py-2">
-            <span className="text-neutral-400 text-xs">Log</span>
-            <select
-              value={selected}
-              onChange={(e) => setSelected(e.target.value)}
-              disabled={logs.length === 0}
-              className="border border-neutral-600 bg-[#2a2d31] text-neutral-200 px-2 py-1 text-xs focus:border-neutral-300 focus:outline-none disabled:text-neutral-600"
-            >
-              {logs.length === 0 ? (
-                <option>No logs</option>
-              ) : (
-                logs.map((name) => (
-                  <option key={name} value={name} className="bg-[#2a2d31]">
-                    {name}
-                  </option>
-                ))
-              )}
-            </select>
-          </div>
-        )}
       </header>
 
       <div
-        className="flex h-[calc(100vh-136px)]"
+        className="flex h-[calc(100vh-44px)]"
         style={{ display: tab === "logs" ? undefined : "none" }}
       >
         <div className="w-1/2 overflow-auto border-r border-neutral-700 p-3">
@@ -450,6 +477,10 @@ export default function Home() {
         active={tab === "dashboard"}
         parsed={parsed}
         loading={loading}
+        selectedProduct={dashboardProduct}
+        onSelectProduct={setDashboardProduct}
+        infoOpen={dashboardInfoOpen}
+        onInfoOpenChange={setDashboardInfoOpen}
       />
 
       <HistoricalView active={tab === "historical"} />
