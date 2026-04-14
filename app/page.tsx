@@ -12,6 +12,7 @@ import MultiPnLChart from "@/components/MultiPnLChart";
 import MultiPositionChart from "@/components/MultiPositionChart";
 import MultiPriceChart from "@/components/MultiPriceChart";
 import HistoricalView from "@/components/HistoricalView";
+import DashboardView from "@/components/DashboardView";
 import {
   ListingTable,
   PositionTable,
@@ -57,7 +58,9 @@ function MultiProductSelector({
 
 export default function Home() {
   const [hoveredTs, setHoveredTs] = useState<number | null>(null);
-  const [tab, setTab] = useState<"logs" | "historical">("logs");
+  const [tab, setTab] = useState<"dashboard" | "logs" | "historical">(
+    "dashboard"
+  );
   useHighchartsSync((ts) => {
     if (ts !== null) setHoveredTs(ts);
   });
@@ -212,6 +215,16 @@ export default function Home() {
 
         <div className="flex items-center gap-3 px-5 py-2 border-b border-neutral-700">
           <button
+            onClick={() => setTab("dashboard")}
+            className={`border px-3 py-1 text-xs transition-colors ${
+              tab === "dashboard"
+                ? "border-neutral-300 bg-neutral-700 text-neutral-100"
+                : "border-neutral-600 bg-[#2a2d31] text-neutral-500 hover:text-neutral-200"
+            }`}
+          >
+            Dashboard
+          </button>
+          <button
             onClick={() => setTab("logs")}
             className={`border px-3 py-1 text-xs transition-colors ${
               tab === "logs"
@@ -233,7 +246,7 @@ export default function Home() {
           </button>
         </div>
 
-        {tab === "logs" && (
+        {(tab === "logs" || tab === "dashboard") && (
           <div className="flex items-center gap-3 px-5 py-2">
             <span className="text-neutral-400 text-xs">Log</span>
             <select
@@ -432,6 +445,12 @@ export default function Home() {
           )}
         </div>
       </div>
+
+      <DashboardView
+        active={tab === "dashboard"}
+        parsed={parsed}
+        loading={loading}
+      />
 
       <HistoricalView active={tab === "historical"} />
     </main>

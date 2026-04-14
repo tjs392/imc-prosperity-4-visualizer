@@ -44,6 +44,8 @@ export type SandboxEntry = {
   timestamp: number;
   listings: Record<string, Listing>;
   orders: Record<string, Order[]>;
+  stdout: string;
+  traderData: string;
 };
 
 export type ProductSeriesRow = {

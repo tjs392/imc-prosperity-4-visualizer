@@ -28,3 +28,40 @@ body {
 .highcharts-reset-zoom {
   display: none !important;
 }
+
+.uplot,
+.uplot *,
+.uplot *::before,
+.uplot *::after {
+  box-sizing: border-box;
+}
+
+.uplot {
+  font-family: inherit;
+  line-height: 1.3;
+  color: #a3a3a3;
+  background: transparent;
+}
+
+.u-wrap {
+  background: #2a2d31;
+}
+
+.u-over {
+  cursor: crosshair;
+}
+
+.u-cursor-x,
+.u-cursor-y {
+  stroke: #737373 !important;
+  border-color: #737373 !important;
+}
+
+.u-select {
+  background: rgba(115, 115, 115, 0.15);
+  border: 1px solid #737373;
+}
+
+.u-legend {
+  display: none !important;
+}

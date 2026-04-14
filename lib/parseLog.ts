@@ -115,6 +115,8 @@ function parseSandboxSection(section: string): SandboxEntry[] {
 
       const tradingState = inner[0];
       const ordersRaw = inner[1];
+      const traderDataOut = typeof inner[3] === "string" ? inner[3] : "";
+      const stdout = typeof inner[4] === "string" ? inner[4] : "";
 
       const listings: Record<string, Listing> = {};
       if (Array.isArray(tradingState) && Array.isArray(tradingState[2])) {
@@ -150,6 +152,8 @@ function parseSandboxSection(section: string): SandboxEntry[] {
         timestamp: outer.timestamp,
         listings,
         orders,
+        stdout,
+        traderData: traderDataOut,
       });
     } catch {
       continue;
@@ -242,6 +246,8 @@ function parseSandboxFromLogsArray(
 
       const tradingState = inner[0];
       const ordersRaw = inner[1];
+      const traderDataOut = typeof inner[3] === "string" ? inner[3] : "";
+      const stdout = typeof inner[4] === "string" ? inner[4] : "";
 
       const listings: Record<string, Listing> = {};
       if (Array.isArray(tradingState) && Array.isArray(tradingState[2])) {
@@ -277,6 +283,8 @@ function parseSandboxFromLogsArray(
         timestamp: Number(outer.timestamp ?? 0),
         listings,
         orders,
+        stdout,
+        traderData: traderDataOut,
       });
     } catch {
       continue;
