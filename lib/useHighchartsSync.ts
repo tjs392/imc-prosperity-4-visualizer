@@ -143,6 +143,7 @@ export function useHighchartsSync(onHover?: (ts: number | null) => void) {
       try {
         for (const chart of Highcharts.charts) {
           if (!chart || chart === sourceChart) continue;
+          if (!chart.container || chart.container.offsetParent === null) continue;
           chart.xAxis[0].setExtremes(evt.min, evt.max, true, false);
         }
       } finally {
@@ -199,7 +200,8 @@ export function useHighchartsSync(onHover?: (ts: number | null) => void) {
       const max = extremes.max ?? extremes.dataMax;
       if (min === undefined || max === undefined) return;
       const range = max - min;
-      const pixelRange = axis.width || 1;
+      const pixelRange =
+        (axis as unknown as { len?: number }).len ?? target.plotWidth ?? 1;
       const shift = (delta / pixelRange) * range;
       let newMin = min + shift;
       let newMax = max + shift;

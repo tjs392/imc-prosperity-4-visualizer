@@ -2,29 +2,23 @@
 
 import { useEffect, useRef } from "react";
 import Highcharts from "highcharts/highstock";
-
-type DataPoint = {
-  time: number;
-  value: number;
-};
+import { MetricPoint } from "@/lib/historicalMetrics";
 
 type Props = {
-  data: DataPoint[];
+  rolling: MetricPoint[];
+  global: MetricPoint[];
+  detrended: MetricPoint[];
   label: string;
-  color?: string;
   height?: number;
-  valueLabel?: string;
-  yPlotLines?: { value: number; color?: string; dashStyle?: string }[];
   xPlotLines?: { value: number; label?: string }[];
 };
 
-export default function SyncedLineChart({
-  data,
+export default function HistoricalZScoreChart({
+  rolling,
+  global,
+  detrended,
   label,
-  color = "#fbbf24",
   height = 260,
-  valueLabel = "value",
-  yPlotLines,
   xPlotLines,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -32,8 +26,6 @@ export default function SyncedLineChart({
 
   useEffect(() => {
     if (!containerRef.current) return;
-
-    const seriesData: [number, number][] = data.map((d) => [d.time, d.value]);
 
     const options: Highcharts.Options = {
       chart: {
@@ -44,7 +36,7 @@ export default function SyncedLineChart({
         zooming: { type: "x" },
         panning: { enabled: true, type: "x" },
         panKey: "shift",
-        style: { fontFamily: "ui-monospace, Menlo, monospace" },
+        style: { fontFamily: "inherit" },
         ...({ showResetZoom: false } as object),
       },
       credits: { enabled: false },
@@ -56,21 +48,13 @@ export default function SyncedLineChart({
       xAxis: {
         type: "linear",
         ordinal: false,
-        lineColor: "#737373",
-        tickColor: "#a3a3a3",
-        tickWidth: 1,
-        tickLength: 5,
-        gridLineColor: "#4a4d52",
+        lineColor: "#525252",
+        tickColor: "#525252",
+        gridLineColor: "#3a3d41",
         gridLineWidth: 1,
-        gridLineDashStyle: "Solid",
-        minorTicks: true,
-        minorTickInterval: "auto",
-        minorTickColor: "#4a4d52",
-        minorTickLength: 3,
-        minorTickWidth: 1,
-        minorGridLineWidth: 0,
+        gridLineDashStyle: "Dot",
         labels: {
-          style: { color: "#d4d4d4", fontSize: "11px" },
+          style: { color: "#a3a3a3", fontSize: "11px" },
           formatter() {
             return String(this.value);
           },
@@ -94,30 +78,18 @@ export default function SyncedLineChart({
       },
       yAxis: {
         opposite: false,
-        gridLineColor: "#4a4d52",
+        gridLineColor: "#3a3d41",
         gridLineWidth: 1,
-        gridLineDashStyle: "Solid",
-        lineColor: "#737373",
-        tickColor: "#a3a3a3",
-        tickWidth: 1,
-        tickLength: 5,
-        minorTicks: true,
-        minorTickInterval: "auto",
-        minorTickColor: "#4a4d52",
-        minorTickLength: 3,
-        minorTickWidth: 1,
-        minorGridLineWidth: 0,
+        gridLineDashStyle: "Dot",
+        lineColor: "#525252",
+        tickColor: "#525252",
         title: { text: undefined },
-        labels: {
-          style: { color: "#d4d4d4", fontSize: "11px" },
-        },
-        plotLines: yPlotLines?.map((pl) => ({
-          value: pl.value,
-          color: pl.color ?? "#525252",
-          width: 1,
-          dashStyle: (pl.dashStyle ?? "Dot") as Highcharts.DashStyleValue,
-          zIndex: 3,
-        })),
+        labels: { style: { color: "#a3a3a3", fontSize: "11px" } },
+        plotLines: [
+          { value: 2, color: "#525252", width: 1, dashStyle: "Dash", zIndex: 3 },
+          { value: 0, color: "#737373", width: 1, zIndex: 3 },
+          { value: -2, color: "#525252", width: 1, dashStyle: "Dash", zIndex: 3 },
+        ],
       },
       tooltip: {
         shared: true,
@@ -130,24 +102,19 @@ export default function SyncedLineChart({
         borderWidth: 1,
         shadow: false,
         padding: 8,
-        style: {
-          color: "#f5f5f5",
-          fontSize: "12px",
-        },
+        style: { color: "#f5f5f5", fontSize: "12px" },
         useHTML: true,
         formatter(this: unknown) {
           const ctx = this as {
             x: number;
-            y: number;
-            series: { name: string; color: string };
             points?: { y: number; series: { name: string; color: string } }[];
           };
           const ts = ctx.x;
-          const pts = ctx.points ?? [ctx];
-          const lines = pts.map((p) => {
-            const seriesColor = (p.series && p.series.color) || color;
-            return `<span style="color:${seriesColor}">\u25CF</span> <span style="color:#a3a3a3">${p.series.name}</span> <b style="color:#f5f5f5">${p.y}</b>`;
-          });
+          const pts = ctx.points ?? [];
+          const lines = pts.map(
+            (p) =>
+              `<span style="color:${p.series.color}">\u25CF</span> <span style="color:#a3a3a3">${p.series.name}</span> <b style="color:#f5f5f5">${p.y.toFixed(2)}</b>`
+          );
           return `<div style="line-height:1.5"><span style="color:#737373">ts</span> <span style="color:#f5f5f5">${ts}</span><br/>${lines.join("<br/>")}</div>`;
         },
       },
@@ -158,6 +125,7 @@ export default function SyncedLineChart({
             hover: { lineWidthPlus: 0 },
             inactive: { opacity: 1 },
           },
+          marker: { enabled: false },
           dataGrouping: {
             enabled: true,
             forced: true,
@@ -166,16 +134,29 @@ export default function SyncedLineChart({
               return values[0];
             },
           },
-          marker: { enabled: false },
         },
       },
       series: [
         {
           type: "line",
-          name: valueLabel,
-          data: seriesData,
-          color,
-          lineWidth: 1,
+          name: "Rolling",
+          color: "#60a5fa",
+          data: rolling.map((p) => [p.time, p.value] as [number, number]),
+          lineWidth: 1.25,
+        },
+        {
+          type: "line",
+          name: "Global",
+          color: "#f97316",
+          data: global.map((p) => [p.time, p.value] as [number, number]),
+          lineWidth: 1.25,
+        },
+        {
+          type: "line",
+          name: "Detrended",
+          color: "#a3e635",
+          data: detrended.map((p) => [p.time, p.value] as [number, number]),
+          lineWidth: 1.25,
         },
       ],
     };
@@ -187,14 +168,28 @@ export default function SyncedLineChart({
       chart.destroy();
       chartRef.current = null;
     };
-  }, [color, height, label, valueLabel, data, yPlotLines, xPlotLines]);
+  }, [height, rolling, global, detrended, xPlotLines]);
 
   return (
     <div className="border border-neutral-600 bg-[#2a2d31]">
       <div className="flex items-center justify-between border-b border-neutral-600 px-3 py-1.5">
-        <span className="text-neutral-100 text-xs font-semibold">
-          {label}
-        </span>
+        <div className="flex items-center gap-3 flex-wrap">
+          <span className="text-neutral-100 text-xs font-semibold">{label}</span>
+          <div className="flex items-center gap-2">
+            <span className="flex items-center gap-1 text-[11px] text-neutral-400">
+              <span className="inline-block w-2 h-2" style={{ backgroundColor: "#60a5fa" }} />
+              Rolling
+            </span>
+            <span className="flex items-center gap-1 text-[11px] text-neutral-400">
+              <span className="inline-block w-2 h-2" style={{ backgroundColor: "#f97316" }} />
+              Global
+            </span>
+            <span className="flex items-center gap-1 text-[11px] text-neutral-400">
+              <span className="inline-block w-2 h-2" style={{ backgroundColor: "#a3e635" }} />
+              Detrended
+            </span>
+          </div>
+        </div>
         <button
           onClick={() => chartRef.current?.xAxis[0].setExtremes()}
           className="text-[11px] text-neutral-400 hover:text-neutral-100 border border-neutral-600 px-1.5 py-0.5"

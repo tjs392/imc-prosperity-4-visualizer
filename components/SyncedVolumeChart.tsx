@@ -8,12 +8,13 @@ type Props = {
   rows: ActivityRow[];
   label: string;
   height?: number;
+  xPlotLines?: { value: number; label?: string }[];
 };
 
 const BID_COLORS = ["#4ade80", "#22c55e", "#16a34a"];
 const ASK_COLORS = ["#f87171", "#ef4444", "#dc2626"];
 
-export default function SyncedVolumeChart({ rows, label, height = 280 }: Props) {
+export default function SyncedVolumeChart({ rows, label, height = 280, xPlotLines }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<Highcharts.Chart | null>(null);
 
@@ -76,6 +77,22 @@ export default function SyncedVolumeChart({ rows, label, height = 280 }: Props) 
             return String(this.value);
           },
         },
+        plotLines: xPlotLines?.map((pl) => ({
+          value: pl.value,
+          color: "#737373",
+          width: 1,
+          dashStyle: "Dash" as Highcharts.DashStyleValue,
+          zIndex: 2,
+          label: pl.label
+            ? {
+                text: pl.label,
+                style: { color: "#a3a3a3", fontSize: "10px" },
+                align: "left",
+                x: 4,
+                y: 12,
+              }
+            : undefined,
+        })),
       },
       yAxis: {
         opposite: false,
@@ -177,7 +194,7 @@ export default function SyncedVolumeChart({ rows, label, height = 280 }: Props) 
       chart.destroy();
       chartRef.current = null;
     };
-  }, [height, rows]);
+  }, [height, rows, xPlotLines]);
 
   return (
     <div className="border border-neutral-600 bg-[#2a2d31]">

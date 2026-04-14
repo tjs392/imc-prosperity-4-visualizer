@@ -2,29 +2,27 @@
 
 import { useEffect, useRef } from "react";
 import Highcharts from "highcharts/highstock";
-
-type DataPoint = {
-  time: number;
-  value: number;
-};
+import { ActivityRow, Trade } from "@/lib/types";
 
 type Props = {
-  data: DataPoint[];
+  rows: ActivityRow[];
+  trades: Trade[];
+  product: string;
   label: string;
-  color?: string;
   height?: number;
-  valueLabel?: string;
-  yPlotLines?: { value: number; color?: string; dashStyle?: string }[];
   xPlotLines?: { value: number; label?: string }[];
 };
 
-export default function SyncedLineChart({
-  data,
+const BID_COLORS = ["#4ade80", "#22c55e", "#16a34a"];
+const ASK_COLORS = ["#f87171", "#ef4444", "#dc2626"];
+const TRADE_COLOR = "#f5f5f5";
+
+export default function HistoricalPriceChart({
+  rows,
+  trades,
+  product,
   label,
-  color = "#fbbf24",
   height = 260,
-  valueLabel = "value",
-  yPlotLines,
   xPlotLines,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -33,7 +31,29 @@ export default function SyncedLineChart({
   useEffect(() => {
     if (!containerRef.current) return;
 
-    const seriesData: [number, number][] = data.map((d) => [d.time, d.value]);
+    const bid1: [number, number][] = [];
+    const bid2: [number, number][] = [];
+    const bid3: [number, number][] = [];
+    const mid: [number, number][] = [];
+    const ask1: [number, number][] = [];
+    const ask2: [number, number][] = [];
+    const ask3: [number, number][] = [];
+
+    for (const row of rows) {
+      if (row.bidPrice1 !== null) bid1.push([row.timestamp, row.bidPrice1]);
+      if (row.bidPrice2 !== null) bid2.push([row.timestamp, row.bidPrice2]);
+      if (row.bidPrice3 !== null) bid3.push([row.timestamp, row.bidPrice3]);
+      if (row.midPrice !== null) mid.push([row.timestamp, row.midPrice]);
+      if (row.askPrice1 !== null) ask1.push([row.timestamp, row.askPrice1]);
+      if (row.askPrice2 !== null) ask2.push([row.timestamp, row.askPrice2]);
+      if (row.askPrice3 !== null) ask3.push([row.timestamp, row.askPrice3]);
+    }
+
+    const tradeDots: { x: number; y: number }[] = [];
+    for (const t of trades) {
+      if (t.symbol !== product) continue;
+      tradeDots.push({ x: t.timestamp, y: t.price });
+    }
 
     const options: Highcharts.Options = {
       chart: {
@@ -44,7 +64,7 @@ export default function SyncedLineChart({
         zooming: { type: "x" },
         panning: { enabled: true, type: "x" },
         panKey: "shift",
-        style: { fontFamily: "ui-monospace, Menlo, monospace" },
+        style: { fontFamily: "inherit" },
         ...({ showResetZoom: false } as object),
       },
       credits: { enabled: false },
@@ -56,21 +76,13 @@ export default function SyncedLineChart({
       xAxis: {
         type: "linear",
         ordinal: false,
-        lineColor: "#737373",
-        tickColor: "#a3a3a3",
-        tickWidth: 1,
-        tickLength: 5,
-        gridLineColor: "#4a4d52",
+        lineColor: "#525252",
+        tickColor: "#525252",
+        gridLineColor: "#3a3d41",
         gridLineWidth: 1,
-        gridLineDashStyle: "Solid",
-        minorTicks: true,
-        minorTickInterval: "auto",
-        minorTickColor: "#4a4d52",
-        minorTickLength: 3,
-        minorTickWidth: 1,
-        minorGridLineWidth: 0,
+        gridLineDashStyle: "Dot",
         labels: {
-          style: { color: "#d4d4d4", fontSize: "11px" },
+          style: { color: "#a3a3a3", fontSize: "11px" },
           formatter() {
             return String(this.value);
           },
@@ -94,30 +106,13 @@ export default function SyncedLineChart({
       },
       yAxis: {
         opposite: false,
-        gridLineColor: "#4a4d52",
+        gridLineColor: "#3a3d41",
         gridLineWidth: 1,
-        gridLineDashStyle: "Solid",
-        lineColor: "#737373",
-        tickColor: "#a3a3a3",
-        tickWidth: 1,
-        tickLength: 5,
-        minorTicks: true,
-        minorTickInterval: "auto",
-        minorTickColor: "#4a4d52",
-        minorTickLength: 3,
-        minorTickWidth: 1,
-        minorGridLineWidth: 0,
+        gridLineDashStyle: "Dot",
+        lineColor: "#525252",
+        tickColor: "#525252",
         title: { text: undefined },
-        labels: {
-          style: { color: "#d4d4d4", fontSize: "11px" },
-        },
-        plotLines: yPlotLines?.map((pl) => ({
-          value: pl.value,
-          color: pl.color ?? "#525252",
-          width: 1,
-          dashStyle: (pl.dashStyle ?? "Dot") as Highcharts.DashStyleValue,
-          zIndex: 3,
-        })),
+        labels: { style: { color: "#a3a3a3", fontSize: "11px" } },
       },
       tooltip: {
         shared: true,
@@ -130,24 +125,21 @@ export default function SyncedLineChart({
         borderWidth: 1,
         shadow: false,
         padding: 8,
-        style: {
-          color: "#f5f5f5",
-          fontSize: "12px",
-        },
+        style: { color: "#f5f5f5", fontSize: "12px" },
         useHTML: true,
         formatter(this: unknown) {
           const ctx = this as {
             x: number;
-            y: number;
-            series: { name: string; color: string };
             points?: { y: number; series: { name: string; color: string } }[];
           };
           const ts = ctx.x;
-          const pts = ctx.points ?? [ctx];
-          const lines = pts.map((p) => {
-            const seriesColor = (p.series && p.series.color) || color;
-            return `<span style="color:${seriesColor}">\u25CF</span> <span style="color:#a3a3a3">${p.series.name}</span> <b style="color:#f5f5f5">${p.y}</b>`;
-          });
+          const pts = (ctx.points ?? []).filter(
+            (p) => p.series.name !== "Trade"
+          );
+          const lines = pts.map(
+            (p) =>
+              `<span style="color:${p.series.color}">\u25CF</span> <span style="color:#a3a3a3">${p.series.name}</span> <b style="color:#f5f5f5">${p.y}</b>`
+          );
           return `<div style="line-height:1.5"><span style="color:#737373">ts</span> <span style="color:#f5f5f5">${ts}</span><br/>${lines.join("<br/>")}</div>`;
         },
       },
@@ -158,6 +150,9 @@ export default function SyncedLineChart({
             hover: { lineWidthPlus: 0 },
             inactive: { opacity: 1 },
           },
+          marker: { enabled: false },
+        },
+        line: {
           dataGrouping: {
             enabled: true,
             forced: true,
@@ -166,16 +161,37 @@ export default function SyncedLineChart({
               return values[0];
             },
           },
-          marker: { enabled: false },
+        },
+        scatter: {
+          dataGrouping: { enabled: false },
         },
       },
       series: [
+        { type: "line", name: "Bid 3", color: BID_COLORS[0], data: bid3, lineWidth: 1 },
+        { type: "line", name: "Bid 2", color: BID_COLORS[1], data: bid2, lineWidth: 1 },
+        { type: "line", name: "Bid 1", color: BID_COLORS[2], data: bid1, lineWidth: 1.25 },
+        { type: "line", name: "Mid", color: "#e5e5e5", data: mid, lineWidth: 1.5 },
+        { type: "line", name: "Ask 1", color: ASK_COLORS[2], data: ask1, lineWidth: 1.25 },
+        { type: "line", name: "Ask 2", color: ASK_COLORS[1], data: ask2, lineWidth: 1 },
+        { type: "line", name: "Ask 3", color: ASK_COLORS[0], data: ask3, lineWidth: 1 },
         {
-          type: "line",
-          name: valueLabel,
-          data: seriesData,
-          color,
-          lineWidth: 1,
+          type: "scatter",
+          name: "Trade",
+          color: TRADE_COLOR,
+          data: tradeDots,
+          enableMouseTracking: false,
+          stickyTracking: false,
+          showInLegend: false,
+          states: {
+            hover: { enabled: false },
+            inactive: { enabled: false, opacity: 1 },
+          },
+          marker: {
+            symbol: "circle",
+            radius: 2.5,
+            lineWidth: 0,
+            states: { hover: { enabled: false } },
+          },
         },
       ],
     };
@@ -187,14 +203,12 @@ export default function SyncedLineChart({
       chart.destroy();
       chartRef.current = null;
     };
-  }, [color, height, label, valueLabel, data, yPlotLines, xPlotLines]);
+  }, [height, rows, trades, product, xPlotLines]);
 
   return (
     <div className="border border-neutral-600 bg-[#2a2d31]">
       <div className="flex items-center justify-between border-b border-neutral-600 px-3 py-1.5">
-        <span className="text-neutral-100 text-xs font-semibold">
-          {label}
-        </span>
+        <span className="text-neutral-100 text-xs font-semibold">{label}</span>
         <button
           onClick={() => chartRef.current?.xAxis[0].setExtremes()}
           className="text-[11px] text-neutral-400 hover:text-neutral-100 border border-neutral-600 px-1.5 py-0.5"

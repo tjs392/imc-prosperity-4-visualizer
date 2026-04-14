@@ -1,6 +1,7 @@
 export type ActivityRow = {
   timestamp: number;
   product: string;
+  day?: number;
   bidPrice1: number | null;
   bidVolume1: number | null;
   bidPrice2: number | null;
@@ -65,4 +66,11 @@ export type ParsedLog = {
   trades: Trade[];
   sandbox: SandboxEntry[];
   listings: Record<string, Listing>;
+};
+
+export type HistoricalDay = {
+  day: number;
+  activities: ActivityRow[];
+  trades: Trade[];
+  products: string[];
 };
