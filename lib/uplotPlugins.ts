@@ -42,6 +42,14 @@ export function broadcastScale(
 export function wheelZoomPlugin(factor: number = 0.75): uPlot.Plugin {
   let xMin: number, xMax: number, xRange: number;
 
+  function refreshRange(u: uPlot) {
+    const xs = u.data[0] as number[];
+    if (!xs || xs.length === 0) return;
+    xMin = xs[0];
+    xMax = xs[xs.length - 1];
+    xRange = xMax - xMin;
+  }
+
   function clampRange(
     nRange: number,
     nMin: number,
@@ -65,9 +73,7 @@ export function wheelZoomPlugin(factor: number = 0.75): uPlot.Plugin {
   return {
     hooks: {
       ready: (u: uPlot) => {
-        xMin = u.scales.x.min ?? 0;
-        xMax = u.scales.x.max ?? 0;
-        xRange = xMax - xMin;
+        refreshRange(u);
 
         const over = u.over;
         const rect = () => over.getBoundingClientRect();
@@ -76,14 +82,34 @@ export function wheelZoomPlugin(factor: number = 0.75): uPlot.Plugin {
           "wheel",
           (e: WheelEvent) => {
             e.preventDefault();
+            const oMin = u.scales.x.min ?? xMin;
+            const oMax = u.scales.x.max ?? xMax;
+            const oxRange = oMax - oMin;
+
+            if (e.deltaX !== 0) {
+              const shift = (e.deltaX / 100) * oxRange * 0.2;
+              let nxMin = oMin + shift;
+              let nxMax = oMax + shift;
+              [nxMin, nxMax] = clampRange(
+                oxRange,
+                nxMin,
+                nxMax,
+                xRange,
+                xMin,
+                xMax
+              );
+              u.batch(() => {
+                u.setScale("x", { min: nxMin, max: nxMax });
+              });
+              return;
+            }
+
             const r = rect();
             const { left } = u.cursor;
             if (left === undefined || left === null || left < 0) return;
 
             const leftPct = left / r.width;
             const xVal = u.posToVal(left, "x");
-            const oxRange =
-              (u.scales.x.max ?? xMax) - (u.scales.x.min ?? xMin);
 
             const nxRange =
               e.deltaY < 0 ? oxRange * factor : oxRange / factor;
@@ -104,6 +130,9 @@ export function wheelZoomPlugin(factor: number = 0.75): uPlot.Plugin {
           },
           { passive: false }
         );
+      },
+      setData: (u: uPlot) => {
+        refreshRange(u);
       },
     },
   };

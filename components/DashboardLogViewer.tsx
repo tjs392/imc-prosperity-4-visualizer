@@ -60,13 +60,13 @@ export default function DashboardLogViewer({ sandbox, hoveredTime }: Props) {
   const hasOrders = entry && Object.keys(entry.orders).length > 0;
 
   return (
-    <div className="border border-neutral-600 bg-[#2a2d31] h-full flex flex-col">
+    <div className="bg-[#2a2d31] h-full flex flex-col min-h-0">
       <div className="flex items-center justify-between border-b border-neutral-600 px-3 py-1.5 flex-none">
         <span className="text-neutral-100 text-xs font-semibold">
           Log Viewer
         </span>
         <span className="text-neutral-500 text-[10px] font-mono">
-          {entry ? `ts ${entry.timestamp}` : "—"}
+          {entry ? `ts ${entry.timestamp}` : "-"}
           {hoveredTime !== null && hoveredTime !== undefined && (
             <span className="text-neutral-600 ml-2">
               (hover {hoveredTime})

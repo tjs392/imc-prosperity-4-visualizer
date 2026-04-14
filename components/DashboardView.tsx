@@ -3,8 +3,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { ParsedLog, ActivityRow, Trade } from "@/lib/types";
 import DashboardUPlotChart from "@/components/DashboardUPlotChart";
+import type { Normalizer, QtyFilter } from "@/components/DashboardUPlotChart";
 import DashboardUPlotPanelChart from "@/components/DashboardUPlotPanelChart";
-import DashboardLogViewer from "@/components/DashboardLogViewer";
+import DashboardRightPanel from "@/components/DashboardRightPanel";
+import DashboardInfoPanel from "@/components/DashboardInfoPanel";
 
 type Props = {
   active: boolean;
@@ -12,23 +14,9 @@ type Props = {
   loading: boolean;
 };
 
-type LevelKey = "bid1" | "bid2" | "bid3" | "ask1" | "ask2" | "ask3";
-type TradeKey = "market" | "ownBuy" | "ownSell";
-
-const LEVEL_ORDER: { key: LevelKey; label: string; color: string }[] = [
-  { key: "ask3", label: "Ask 3", color: "rgba(239, 68, 68, 0.35)" },
-  { key: "ask2", label: "Ask 2", color: "rgba(239, 68, 68, 0.65)" },
-  { key: "ask1", label: "Ask 1", color: "rgba(239, 68, 68, 1)" },
-  { key: "bid1", label: "Bid 1", color: "rgba(59, 130, 246, 1)" },
-  { key: "bid2", label: "Bid 2", color: "rgba(59, 130, 246, 0.65)" },
-  { key: "bid3", label: "Bid 3", color: "rgba(59, 130, 246, 0.35)" },
-];
-
-const TRADE_ORDER: { key: TradeKey; label: string; color: string }[] = [
-  { key: "market", label: "Market Trades", color: "#fbbf24" },
-  { key: "ownBuy", label: "Own Buys", color: "#22c55e" },
-  { key: "ownSell", label: "Own Sells", color: "#ef4444" },
-];
+export type LevelKey = "bid1" | "bid2" | "bid3" | "ask1" | "ask2" | "ask3" | "mid";
+export type TradeKey = "botMaker" | "botTaker" | "myBuy" | "mySell";
+export type OrderKey = "ownOrders";
 
 function computePositions(
   trades: Trade[],
@@ -54,6 +42,10 @@ export default function DashboardView({ active, parsed, loading }: Props) {
   const [selectedProduct, setSelectedProduct] = useState<string | null>(null);
   const [resetSignal, setResetSignal] = useState(0);
   const [hoveredTime, setHoveredTime] = useState<number | null>(null);
+  const [normalizer, setNormalizer] = useState<Normalizer>("none");
+  const [infoOpen, setInfoOpen] = useState(false);
+  const [qtyMin, setQtyMin] = useState(0);
+  const [qtyMax, setQtyMax] = useState<number | null>(null);
   const [visibleLevels, setVisibleLevels] = useState<Record<LevelKey, boolean>>({
     bid1: true,
     bid2: true,
@@ -61,12 +53,19 @@ export default function DashboardView({ active, parsed, loading }: Props) {
     ask1: true,
     ask2: true,
     ask3: true,
+    mid: true,
   });
   const [visibleTrades, setVisibleTrades] = useState<Record<TradeKey, boolean>>(
     {
-      market: true,
-      ownBuy: true,
-      ownSell: true,
+      botMaker: true,
+      botTaker: true,
+      myBuy: true,
+      mySell: true,
+    }
+  );
+  const [visibleOrders, setVisibleOrders] = useState<Record<OrderKey, boolean>>(
+    {
+      ownOrders: true,
     }
   );
 
@@ -78,6 +77,7 @@ export default function DashboardView({ active, parsed, loading }: Props) {
     ) {
       setSelectedProduct(parsed.products[0].product);
     }
+    setResetSignal((n) => n + 1);
   }, [parsed, selectedProduct]);
 
   const toggleLevel = (key: LevelKey) => {
@@ -86,6 +86,10 @@ export default function DashboardView({ active, parsed, loading }: Props) {
 
   const toggleTrade = (key: TradeKey) => {
     setVisibleTrades((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const toggleOrder = (key: OrderKey) => {
+    setVisibleOrders((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
   const productObj = parsed?.products.find(
@@ -112,12 +116,28 @@ export default function DashboardView({ active, parsed, loading }: Props) {
     return computePositions(parsed.trades, productObj.product);
   }, [parsed, productObj]);
 
+  const maxTradeQty = useMemo(() => {
+    if (!parsed || !productObj) return 0;
+    let m = 0;
+    for (const t of parsed.trades) {
+      if (t.symbol !== productObj.product) continue;
+      const a = Math.abs(t.quantity);
+      if (a > m) m = a;
+    }
+    return m;
+  }, [parsed, productObj]);
+
+  useEffect(() => {
+    setQtyMin(0);
+    setQtyMax(null);
+  }, [selectedProduct]);
+
   return (
     <div
-      className="h-[calc(100vh-136px)] overflow-auto"
+      className="h-[calc(100vh-136px)] overflow-y-auto overflow-x-hidden"
       style={{ display: active ? undefined : "none" }}
     >
-      <div className="p-2 flex flex-col h-full min-h-0">
+      <div className="p-2 flex flex-col h-full min-h-0 min-w-0">
         <div className="flex items-center justify-between border-b border-neutral-700 pb-1.5 mb-2 flex-none">
           <div className="flex items-center gap-3 flex-wrap">
             <h2 className="text-neutral-100 font-semibold text-[13px]">
@@ -151,6 +171,13 @@ export default function DashboardView({ active, parsed, loading }: Props) {
                 ))
               )}
             </select>
+            <button
+              onClick={() => setInfoOpen(true)}
+              className="border border-neutral-600 bg-[#2a2d31] text-neutral-300 hover:text-neutral-100 hover:border-neutral-400 px-2 py-1 text-xs font-mono transition-colors"
+              aria-label="Open reference panel"
+            >
+              info
+            </button>
           </div>
         </div>
 
@@ -163,83 +190,55 @@ export default function DashboardView({ active, parsed, loading }: Props) {
 
         {parsed && productObj && (
           <>
-            <div className="flex items-center gap-4 flex-wrap mb-2 pb-1.5 border-b border-neutral-700 flex-none">
-              <span className="text-neutral-400 text-xs">Levels</span>
-              <div className="flex items-center gap-2 flex-wrap">
-                {LEVEL_ORDER.map(({ key, label, color }) => {
-                  const isOn = visibleLevels[key];
-                  return (
-                    <button
-                      key={key}
-                      onClick={() => toggleLevel(key)}
-                      className={`flex items-center gap-1.5 border px-2 py-1 text-[11px] transition-colors ${
-                        isOn
-                          ? "border-neutral-300 bg-neutral-700 text-neutral-100"
-                          : "border-neutral-600 bg-[#2a2d31] text-neutral-500 hover:text-neutral-200"
-                      }`}
-                    >
-                      <span
-                        className="inline-block w-2 h-2"
-                        style={{ backgroundColor: color }}
-                      />
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-              <span className="text-neutral-600">|</span>
-              <span className="text-neutral-400 text-xs">Trades</span>
-              <div className="flex items-center gap-2 flex-wrap">
-                {TRADE_ORDER.map(({ key, label, color }) => {
-                  const isOn = visibleTrades[key];
-                  return (
-                    <button
-                      key={key}
-                      onClick={() => toggleTrade(key)}
-                      className={`flex items-center gap-1.5 border px-2 py-1 text-[11px] transition-colors ${
-                        isOn
-                          ? "border-neutral-300 bg-neutral-700 text-neutral-100"
-                          : "border-neutral-600 bg-[#2a2d31] text-neutral-500 hover:text-neutral-200"
-                      }`}
-                    >
-                      <span
-                        className="inline-block w-2 h-2"
-                        style={{ backgroundColor: color }}
-                      />
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-2 flex-1 min-h-0">
-              <div className="grid grid-cols-[2fr_1fr] gap-2 flex-1 min-h-0">
+            <div className="flex flex-col gap-2 flex-1 min-h-0 min-w-0">
+              <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-2 flex-1 min-h-0 min-w-0">
                 <DashboardUPlotChart
                   rows={activityRows}
                   trades={parsed.trades}
+                  sandbox={parsed.sandbox}
                   product={productObj.product}
-                  label={`Order Book · ${productObj.product}`}
-                  minHeight={320}
+                  label={`Order Book - ${productObj.product}`}
+                  minHeight={240}
                   visibleLevels={visibleLevels}
                   visibleTrades={visibleTrades}
+                  visibleOrders={visibleOrders}
+                  normalizer={normalizer}
+                  qtyFilter={{
+                    min: qtyMin,
+                    max: qtyMax === null ? Infinity : qtyMax,
+                  }}
                   resetSignal={resetSignal}
                   onResetRequest={() => setResetSignal((n) => n + 1)}
                   onHoverTime={setHoveredTime}
                 />
 
-                <div className="h-full min-h-0">
-                  <DashboardLogViewer
-                    sandbox={parsed.sandbox}
+                <div className="h-full min-h-0 min-w-0 hidden lg:block">
+                  <DashboardRightPanel
+                    parsed={parsed}
+                    selectedProduct={selectedProduct}
+                    onSelectProduct={setSelectedProduct}
+                    normalizer={normalizer}
+                    onSelectNormalizer={setNormalizer}
+                    visibleLevels={visibleLevels}
+                    onToggleLevel={toggleLevel}
+                    visibleTrades={visibleTrades}
+                    onToggleTrade={toggleTrade}
+                    visibleOrders={visibleOrders}
+                    onToggleOrder={toggleOrder}
+                    qtyMin={qtyMin}
+                    qtyMax={qtyMax}
+                    maxTradeQty={maxTradeQty}
+                    onQtyMinChange={setQtyMin}
+                    onQtyMaxChange={setQtyMax}
                     hoveredTime={hoveredTime}
                   />
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-2 flex-none">
+              <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2 flex-none min-w-0">
                 <DashboardUPlotPanelChart
                   data={pnlData}
-                  label={`Profit / Loss · ${productObj.product}`}
+                  label={`Profit / Loss - ${productObj.product}`}
                   color="#a3e635"
                   valueLabel="pnl"
                   height={120}
@@ -248,7 +247,7 @@ export default function DashboardView({ active, parsed, loading }: Props) {
                 />
                 <DashboardUPlotPanelChart
                   data={positionData}
-                  label={`Position · ${productObj.product}`}
+                  label={`Position - ${productObj.product}`}
                   color="#60a5fa"
                   valueLabel="pos"
                   step
@@ -261,6 +260,7 @@ export default function DashboardView({ active, parsed, loading }: Props) {
           </>
         )}
       </div>
+      <DashboardInfoPanel open={infoOpen} onClose={() => setInfoOpen(false)} />
     </div>
   );
 }

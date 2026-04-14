@@ -65,3 +65,36 @@ body {
 .u-legend {
   display: none !important;
 }
+
+.qty-slider-thumb::-webkit-slider-thumb {
+  pointer-events: auto;
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: #e5e5e5;
+  border: 1px solid #525252;
+  cursor: pointer;
+  margin-top: 0;
+}
+
+.qty-slider-thumb::-moz-range-thumb {
+  pointer-events: auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: #e5e5e5;
+  border: 1px solid #525252;
+  cursor: pointer;
+}
+
+.qty-slider-thumb::-webkit-slider-runnable-track {
+  background: transparent;
+  height: 14px;
+}
+
+.qty-slider-thumb::-moz-range-track {
+  background: transparent;
+  height: 14px;
+}
