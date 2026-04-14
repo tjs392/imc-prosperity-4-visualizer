@@ -165,10 +165,63 @@ export function useHighchartsSync(onHover?: (ts: number | null) => void) {
 
     document.addEventListener("mousemove", handler);
     document.addEventListener("mouseleave", clearHandler);
+
+    const wheelHandler = (e: WheelEvent) => {
+      let target: Highcharts.Chart | null = null;
+      for (const chart of Highcharts.charts) {
+        if (!chart) continue;
+        const container = chart.container;
+        if (!container) continue;
+        const rect = container.getBoundingClientRect();
+        if (
+          e.clientX >= rect.left &&
+          e.clientX <= rect.right &&
+          e.clientY >= rect.top &&
+          e.clientY <= rect.bottom
+        ) {
+          target = chart;
+          break;
+        }
+      }
+      if (!target) return;
+      const delta =
+        Math.abs(e.deltaX) > Math.abs(e.deltaY)
+          ? e.deltaX
+          : e.shiftKey
+          ? e.deltaY
+          : 0;
+      if (delta === 0) return;
+      e.preventDefault();
+      const axis = target.xAxis[0];
+      if (!axis) return;
+      const extremes = axis.getExtremes();
+      const min = extremes.min ?? extremes.dataMin;
+      const max = extremes.max ?? extremes.dataMax;
+      if (min === undefined || max === undefined) return;
+      const range = max - min;
+      const pixelRange = axis.width || 1;
+      const shift = (delta / pixelRange) * range;
+      let newMin = min + shift;
+      let newMax = max + shift;
+      const dataMin = extremes.dataMin;
+      const dataMax = extremes.dataMax;
+      if (dataMin !== undefined && newMin < dataMin) {
+        newMax += dataMin - newMin;
+        newMin = dataMin;
+      }
+      if (dataMax !== undefined && newMax > dataMax) {
+        newMin -= newMax - dataMax;
+        newMax = dataMax;
+      }
+      axis.setExtremes(newMin, newMax, true, false);
+    };
+    document.addEventListener("wheel", wheelHandler, { passive: false });
+
     return () => {
       window.clearInterval(interval);
       document.removeEventListener("mousemove", handler);
       document.removeEventListener("mouseleave", clearHandler);
+      document.removeEventListener("wheel", wheelHandler);
       for (const chart of attached) {
         try {
           if (chart && chart.xAxis && chart.xAxis[0]) {

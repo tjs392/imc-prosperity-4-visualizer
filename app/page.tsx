@@ -159,7 +159,13 @@ export default function Home() {
       });
   }, [selected]);
 
-  const timeStr = new Date().toISOString().slice(11, 19);
+  const [timeStr, setTimeStr] = useState<string>("");
+  useEffect(() => {
+    const update = () => setTimeStr(new Date().toISOString().slice(11, 19));
+    update();
+    const id = window.setInterval(update, 1000);
+    return () => window.clearInterval(id);
+  }, []);
   const productList = parsed?.products.map((p) => p.product) ?? [];
   const isMulti = chartsProducts.length > 1;
   const chartsProductsKey = chartsProducts.join(",");
