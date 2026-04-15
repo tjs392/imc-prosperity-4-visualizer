@@ -13,27 +13,27 @@ import {
   computeRollingZScore,
   computeGlobalZScore,
   computeDetrendedZScore,
-  computeACF,
-  computeACFConfidenceBand,
   computePairSpread,
   computeProductMetrics,
   computePairMetrics,
   ProductMetrics,
   PairMetrics,
 } from "@/lib/historicalMetrics";
-import SyncedLineChart from "@/components/SyncedLineChart";
-import SyncedVolumeChart from "@/components/SyncedVolumeChart";
-import HistoricalPriceChart from "@/components/HistoricalPriceChart";
-import HistoricalZScoreChart from "@/components/HistoricalZScoreChart";
-import HistoricalACFChart from "@/components/HistoricalACFChart";
-import HistoricalPairSpreadChart from "@/components/HistoricalPairSpreadChart";
-import HistoricalMidScatterChart from "@/components/HistoricalMidScatterChart";
-import HistoricalMetricsStrip from "@/components/HistoricalMetricsStrip";
+import HistoricalLineChart from "@/components/Historical/HistoricalLineChart";
+import HistoricalVolumeChart from "@/components/Historical/HistoricalVolumeChart";
+import HistoricalPriceChart from "@/components/Historical/HistoricalPriceChart";
+import HistoricalZScoreChart from "@/components/Historical/HistoricalZScoreChart";
+import HistoricalPairSpreadChart from "@/components/Historical/HistoricalPairSpreadChart";
+import HistoricalMetricsStrip from "@/components/Historical/HistoricalMetricsStrip";
 import MultiSelectDropdown from "@/components/MultiSelectDropdown";
+import HistoricalRightPanel from "@/components/Historical/HistoricalRightPanel";
 
 const ROLLING_WINDOW = 100;
-const ACF_MAX_LAG = 50;
 const ALL_KEY = "__all__";
+
+// Shared cursor + x-scale sync key for every time-axis chart on this page.
+// All charts that pass this key will pan/zoom and crosshair together.
+const HISTORICAL_SYNC_KEY = "historical";
 
 type DaySelection = number | typeof ALL_KEY;
 
@@ -43,9 +43,7 @@ type ChartId =
   | "spread"
   | "volatility"
   | "zscore"
-  | "acf"
-  | "pairSpread"
-  | "midScatter";
+  | "pairSpread";
 
 const CHART_LABELS: Record<ChartId, string> = {
   price: "Price",
@@ -53,9 +51,7 @@ const CHART_LABELS: Record<ChartId, string> = {
   spread: "Bid-Ask Spread",
   volatility: "Volatility",
   zscore: "Z-Scores",
-  acf: "ACF",
   pairSpread: "Pair Spread",
-  midScatter: "Mid Scatter",
 };
 
 const ALL_CHARTS: ChartId[] = [
@@ -64,9 +60,7 @@ const ALL_CHARTS: ChartId[] = [
   "spread",
   "volatility",
   "zscore",
-  "acf",
   "pairSpread",
-  "midScatter",
 ];
 
 const SINGLE_CHART_IDS: ChartId[] = [
@@ -75,20 +69,13 @@ const SINGLE_CHART_IDS: ChartId[] = [
   "spread",
   "volatility",
   "zscore",
-  "acf",
 ];
 
-const PAIR_CHART_IDS: ChartId[] = ["pairSpread", "midScatter"];
+const PAIR_CHART_IDS: ChartId[] = ["pairSpread"];
 
 const PAIR_CHARTS: Set<ChartId> = new Set(PAIR_CHART_IDS);
 
-const DEFAULT_ENABLED: ChartId[] = [
-  "price",
-  "zscore",
-  "acf",
-  "pairSpread",
-  "midScatter",
-];
+const DEFAULT_ENABLED: ChartId[] = ["price"];
 
 const STORAGE_KEY = "historical_enabled_charts";
 
@@ -105,6 +92,8 @@ type LoadedData = {
 };
 
 export default function HistoricalView({ active }: Props) {
+  const [rounds, setRounds] = useState<number[]>([]);
+  const [selectedRound, setSelectedRound] = useState<number | null>(null);
   const [days, setDays] = useState<number[]>([]);
   const [selectedDay, setSelectedDay] = useState<DaySelection | null>(null);
   const [loadedData, setLoadedData] = useState<LoadedData | null>(null);
@@ -116,6 +105,13 @@ export default function HistoricalView({ active }: Props) {
   const [mergedCache, setMergedCache] = useState<MergedHistorical | null>(null);
   const [enabledCharts, setEnabledCharts] =
     useState<ChartId[]>(DEFAULT_ENABLED);
+  // Bumping this signal triggers every time-axis chart to reset its x-zoom
+  // to the full data range (mirrors the dashboard's resetSignal pattern).
+  const [resetSignal, setResetSignal] = useState(0);
+  const [showPanel, setShowPanel] = useState(false);
+  const [source, setSource] = useState<"historical" | "simulated">("historical");
+  const [simDays, setSimDays] = useState<number[]>([]);
+  const [refreshSignal, setRefreshSignal] = useState(0);
 
   useEffect(() => {
     try {
@@ -143,21 +139,84 @@ export default function HistoricalView({ active }: Props) {
   useEffect(() => {
     fetch("/api/historical")
       .then((r) => r.json())
-      .then((list: number[]) => {
-        setDays(list);
-        if (list.length > 0 && selectedDay === null) {
-          setSelectedDay(list.length > 1 ? ALL_KEY : list[0]);
+      .then((j: { rounds: number[] }) => {
+        setRounds(j.rounds);
+        if (j.rounds.length > 0) setSelectedRound(j.rounds[0]);
+      })
+      .catch((err) => console.error("rounds list failed:", err));
+  }, []);
+
+  useEffect(() => {
+    if (selectedRound === null) return;
+    setDayCache(new Map());
+    setMergedCache(null);
+    setLoadedData(null);
+    setSelectedDay(null);
+    setSimDays([]);
+
+    const histReq = fetch(`/api/historical?round=${selectedRound}`).then((r) => r.json());
+    const simReq =
+      source === "simulated"
+        ? fetch(`/api/historical?round=${selectedRound}&source=simulated`).then((r) => r.json())
+        : Promise.resolve([] as number[]);
+
+    Promise.all([histReq, simReq])
+      .then(([histList, simList]: [number[], number[]]) => {
+        const histSet = new Set(histList);
+        const simOnly = simList.filter((d) => !histSet.has(d));
+        const combined = [...histList, ...simOnly].sort((a, b) => a - b);
+        setDays(combined);
+        setSimDays(simOnly);
+        if (combined.length > 0) {
+          setSelectedDay(combined.length > 1 ? ALL_KEY : combined[0]);
         }
       })
-      .catch((err) => console.error("historical list failed:", err));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+      .catch((err) => console.error("days list failed:", err));
+  }, [selectedRound, source]);
+
+  useEffect(() => {
+    if (refreshSignal === 0) return;
+    if (selectedRound === null) return;
+    if (source !== "simulated") {
+      setSource("simulated");
+      return;
+    }
+
+    fetch(`/api/historical?round=${selectedRound}&source=simulated`)
+      .then((r) => r.json())
+      .then((simList: number[]) => {
+        setDayCache((prev) => {
+          const next = new Map(prev);
+          for (const d of simList) next.delete(d);
+          return next;
+        });
+        setMergedCache(null);
+
+        return fetch(`/api/historical?round=${selectedRound}`)
+          .then((r) => r.json())
+          .then((histList: number[]) => {
+            const histSet = new Set(histList);
+            const simOnly = simList.filter((d) => !histSet.has(d));
+            const combined = [...histList, ...simOnly].sort((a, b) => a - b);
+            setDays(combined);
+            setSimDays(simOnly);
+            setLoadedData(null);
+            setSelectedDay((prev) => prev ?? (combined.length > 1 ? ALL_KEY : combined[0] ?? null));
+          });
+      })
+      .catch((err) => console.error("refresh failed:", err));
+  }, [refreshSignal, selectedRound, source]);
 
   const fetchSingleDay = async (day: number): Promise<HistoricalDay> => {
     const cached = dayCache.get(day);
     if (cached) return cached;
-    const pricesUrl = `/historical/prices_round_1_day_${day}.csv`;
-    const tradesUrl = `/historical/trades_round_1_day_${day}.csv`;
+    const round = selectedRound;
+    const isSim = simDays.includes(day);
+    const baseDir = isSim
+      ? `/simulation/round${round}/generated`
+      : `/historical/round${round}`;
+    const pricesUrl = `${baseDir}/prices_round_${round}_day_${day}.csv`;
+    const tradesUrl = `${baseDir}/trades_round_${round}_day_${day}.csv`;
     const [pricesRaw, tradesRaw] = await Promise.all([
       fetch(pricesUrl).then((r) => r.text()),
       fetch(tradesUrl).then((r) => r.text()),
@@ -236,6 +295,12 @@ export default function HistoricalView({ active }: Props) {
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDay, days, mergedCache]);
+
+  // When the dataset changes, snap every chart back to its full range.
+  useEffect(() => {
+    if (!loadedData) return;
+    setResetSignal((n) => n + 1);
+  }, [loadedData]);
 
   useEffect(() => {
     if (!loadedData || loadedData.products.length === 0) return;
@@ -352,21 +417,6 @@ export default function HistoricalView({ active }: Props) {
     return m;
   }, [selectedProducts, rowsByProduct]);
 
-  const acfByProduct = useMemo(() => {
-    const m = new Map<
-      string,
-      { data: ReturnType<typeof computeACF>; band: number }
-    >();
-    for (const p of selectedProducts) {
-      const rows = rowsByProduct.get(p) ?? [];
-      m.set(p, {
-        data: computeACF(rows, ACF_MAX_LAG),
-        band: computeACFConfidenceBand(rows),
-      });
-    }
-    return m;
-  }, [selectedProducts, rowsByProduct]);
-
   const isChartAvailable = (id: ChartId): boolean => {
     if (PAIR_CHARTS.has(id)) return hasPair;
     return true;
@@ -395,7 +445,7 @@ export default function HistoricalView({ active }: Props) {
 
   return (
     <div
-      className="h-[calc(100vh-136px)] overflow-auto"
+      className="min-h-[calc(100vh-44px)]"
       style={{ display: active ? undefined : "none" }}
     >
       <div className="p-3">
@@ -412,6 +462,63 @@ export default function HistoricalView({ active }: Props) {
             )}
           </div>
           <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => setResetSignal((n) => n + 1)}
+              disabled={!loadedData}
+              className="border border-neutral-600 bg-[#2a2d31] text-neutral-300 hover:text-neutral-100 px-2 py-1 text-[11px] disabled:text-neutral-600"
+            >
+              Reset zoom
+            </button>
+            <button
+              onClick={() => setShowPanel((v) => !v)}
+              className={`border px-2 py-1 text-[11px] ${
+                showPanel
+                  ? "border-neutral-300 bg-neutral-700 text-neutral-100"
+                  : "border-neutral-600 bg-[#2a2d31] text-neutral-300 hover:text-neutral-100"
+              }`}
+            >
+              Tools
+            </button>
+            <span className="text-neutral-400 text-xs">Source</span>
+            <div className="flex">
+              <button
+                onClick={() => setSource("historical")}
+                className={`border px-2 py-1 text-[11px] ${
+                  source === "historical"
+                    ? "border-neutral-300 bg-neutral-700 text-neutral-100"
+                    : "border-neutral-600 bg-[#2a2d31] text-neutral-300 hover:text-neutral-100"
+                }`}
+              >
+                Historical
+              </button>
+              <button
+                onClick={() => setSource("simulated")}
+                className={`border-t border-r border-b px-2 py-1 text-[11px] ${
+                  source === "simulated"
+                    ? "border-neutral-300 bg-neutral-700 text-neutral-100"
+                    : "border-neutral-600 bg-[#2a2d31] text-neutral-300 hover:text-neutral-100"
+                }`}
+              >
+                Simulated
+              </button>
+            </div>
+            <span className="text-neutral-400 text-xs">Round</span>
+            <select
+              value={selectedRound ?? ""}
+              onChange={(e) => setSelectedRound(Number(e.target.value))}
+              disabled={rounds.length === 0}
+              className="border border-neutral-600 bg-[#2a2d31] text-neutral-200 px-2 py-1 text-xs focus:border-neutral-300 focus:outline-none disabled:text-neutral-600"
+            >
+              {rounds.length === 0 ? (
+                <option>-</option>
+              ) : (
+                rounds.map((r) => (
+                  <option key={r} value={r} className="bg-[#2a2d31]">
+                    {r}
+                  </option>
+                ))
+              )}
+            </select>
             <span className="text-neutral-400 text-xs">Day</span>
             <select
               value={selectedDay ?? ""}
@@ -434,7 +541,7 @@ export default function HistoricalView({ active }: Props) {
                   )}
                   {days.map((d) => (
                     <option key={d} value={d} className="bg-[#2a2d31]">
-                      {d}
+                      {d}{simDays.includes(d) ? " (sim)" : ""}
                     </option>
                   ))}
                 </>
@@ -455,15 +562,27 @@ export default function HistoricalView({ active }: Props) {
         {!loadedData && loading && (
           <p className="text-neutral-500 text-xs">Loading...</p>
         )}
-        {!loadedData && !loading && days.length === 0 && (
+        {!loadedData && !loading && rounds.length === 0 && (
           <p className="text-neutral-500 text-xs">
-            No historical data found. Place files in public/historical/.
+            No historical data found. Place files in public/historical/round1/, public/historical/round2/, etc.
+          </p>
+        )}
+        {!loadedData && !loading && rounds.length > 0 && days.length === 0 && (
+          <p className="text-neutral-500 text-xs">
+            No CSV files found in public/historical/round{selectedRound}/.
           </p>
         )}
 
         {loadedData && selectedProducts.length > 0 && (
-          <>
-            <HistoricalMetricsStrip
+          <div
+            className={
+              showPanel
+                ? "grid gap-3 grid-cols-1 lg:grid-cols-[minmax(0,6fr)_minmax(0,4fr)]"
+                : ""
+            }
+          >
+            <div className="min-w-0">
+              <HistoricalMetricsStrip
               productMetrics={productMetrics}
               pairMetrics={pairMetrics}
             />
@@ -532,23 +651,27 @@ export default function HistoricalView({ active }: Props) {
                         label={`Price · ${p}`}
                         height={260}
                         xPlotLines={xPlotLines}
+                        syncKey={HISTORICAL_SYNC_KEY}
+                        resetSignal={resetSignal}
                       />
                     );
                   }
                   if (id === "volume") {
                     return (
-                      <SyncedVolumeChart
+                      <HistoricalVolumeChart
                         key={`${id}-${p}`}
                         rows={rows}
                         label={`Volume · ${p}`}
                         height={260}
                         xPlotLines={xPlotLines}
+                        syncKey={HISTORICAL_SYNC_KEY}
+                        resetSignal={resetSignal}
                       />
                     );
                   }
                   if (id === "spread") {
                     return (
-                      <SyncedLineChart
+                      <HistoricalLineChart
                         key={`${id}-${p}`}
                         data={spreadByProduct.get(p) ?? []}
                         label={`Bid-Ask Spread · ${p}`}
@@ -556,19 +679,24 @@ export default function HistoricalView({ active }: Props) {
                         valueLabel="spread"
                         height={260}
                         xPlotLines={xPlotLines}
+                        syncKey={HISTORICAL_SYNC_KEY}
+                        resetSignal={resetSignal}
                       />
                     );
                   }
                   if (id === "volatility") {
                     return (
-                      <SyncedLineChart
+                      <HistoricalLineChart
                         key={`${id}-${p}`}
                         data={volByProduct.get(p) ?? []}
                         label={`Volatility (${ROLLING_WINDOW * 100}ts) · ${p}`}
                         color="#f97316"
                         valueLabel="stdev"
                         height={260}
+                        formatValue={(v) => v.toFixed(5)}
                         xPlotLines={xPlotLines}
+                        syncKey={HISTORICAL_SYNC_KEY}
+                        resetSignal={resetSignal}
                       />
                     );
                   }
@@ -582,18 +710,8 @@ export default function HistoricalView({ active }: Props) {
                         label={`Z-Scores (${ROLLING_WINDOW * 100}ts) · ${p}`}
                         height={260}
                         xPlotLines={xPlotLines}
-                      />
-                    );
-                  }
-                  if (id === "acf") {
-                    const acf = acfByProduct.get(p);
-                    return (
-                      <HistoricalACFChart
-                        key={`${id}-${p}`}
-                        data={acf?.data ?? []}
-                        confidenceBand={acf?.band ?? 0}
-                        label={`ACF · ${p}`}
-                        height={260}
+                        syncKey={HISTORICAL_SYNC_KEY}
+                        resetSignal={resetSignal}
                       />
                     );
                   }
@@ -618,20 +736,8 @@ export default function HistoricalView({ active }: Props) {
                         )}·${b}`}
                         height={260}
                         xPlotLines={xPlotLines}
-                      />
-                    );
-                  }
-                  if (id === "midScatter" && hasPair) {
-                    const [a, b] = selectedProducts;
-                    return (
-                      <HistoricalMidScatterChart
-                        key={id}
-                        aRows={rowsByProduct.get(a) ?? []}
-                        bRows={rowsByProduct.get(b) ?? []}
-                        productA={a}
-                        productB={b}
-                        label={`${a} vs ${b}`}
-                        height={260}
+                        syncKey={HISTORICAL_SYNC_KEY}
+                        resetSignal={resetSignal}
                       />
                     );
                   }
@@ -639,7 +745,17 @@ export default function HistoricalView({ active }: Props) {
                 })}
               </div>
             )}
-          </>
+            </div>
+            {showPanel && (
+              <div className="min-w-0">
+                <HistoricalRightPanel
+                  round={selectedRound}
+                  onClose={() => setShowPanel(false)}
+                  onGenerated={() => setRefreshSignal((n) => n + 1)}
+                />
+              </div>
+            )}
+          </div>
         )}
       </div>
     </div>

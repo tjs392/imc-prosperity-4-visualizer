@@ -8,11 +8,11 @@ import SyncedLineChart from "@/components/SyncedLineChart";
 import SyncedVolumeChart from "@/components/SyncedVolumeChart";
 import SyncedPriceChart from "@/components/SyncedPriceChart";
 import SyncedPositionChart from "@/components/SyncedPositionChart";
-import MultiPnLChart from "@/components/MultiPnLChart";
-import MultiPositionChart from "@/components/MultiPositionChart";
-import MultiPriceChart from "@/components/MultiPriceChart";
-import HistoricalView from "@/components/HistoricalView";
-import DashboardView from "@/components/DashboardView";
+import MultiPnLChart from "@/components/Logs/MultiPnLChart";
+import MultiPositionChart from "@/components/Logs/MultiPositionChart";
+import MultiPriceChart from "@/components/Logs/MultiPriceChart";
+import HistoricalView from "@/components/Historical/HistoricalView";
+import DashboardView from "@/components/Dashboard/DashboardView";
 import {
   ListingTable,
   PositionTable,
@@ -20,7 +20,7 @@ import {
   OrderDepthTable,
   OrderTable,
   TradeTable,
-} from "@/components/tables";
+} from "@/components/Logs/tables";
 import { useHighchartsSync } from "@/lib/useHighchartsSync";
 
 const FIXED_PLOT_IDS = ["pnl", "position", "price", "volume"];

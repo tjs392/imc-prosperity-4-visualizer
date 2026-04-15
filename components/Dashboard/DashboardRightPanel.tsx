@@ -2,9 +2,9 @@
 
 import { ParsedLog } from "@/lib/types";
 import type { SpreadType, VolumeType } from "@/lib/bookMath";
-import DashboardLogViewer from "@/components/DashboardLogViewer";
-import type { Normalizer } from "@/components/DashboardUPlotChart";
-import type { LevelKey, TradeKey, OrderKey, PnlStats } from "@/components/DashboardView";
+import DashboardLogViewer from "@/components/Dashboard/DashboardLogViewer";
+import type { Normalizer } from "@/components/Dashboard/DashboardUPlotChart";
+import type { LevelKey, TradeKey, OrderKey, PnlStats } from "@/components/Dashboard/DashboardView";
 
 type TradeShape = "square" | "triangleUp" | "triangleDown" | "star";
 

@@ -3,11 +3,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { ParsedLog, ActivityRow, Trade } from "@/lib/types";
 import { computeSpreadSeries, SpreadType, computeVolumeSeries, VolumeType } from "@/lib/bookMath";
-import DashboardUPlotChart from "@/components/DashboardUPlotChart";
-import type { Normalizer, QtyFilter } from "@/components/DashboardUPlotChart";
-import DashboardUPlotPanelChart from "@/components/DashboardUPlotPanelChart";
-import DashboardRightPanel from "@/components/DashboardRightPanel";
-import DashboardInfoPanel from "@/components/DashboardInfoPanel";
+import DashboardUPlotChart from "@/components/Dashboard/DashboardUPlotChart";
+import type { Normalizer, QtyFilter } from "@/components/Dashboard/DashboardUPlotChart";
+import DashboardUPlotPanelChart from "@/components/Dashboard/DashboardUPlotPanelChart";
+import DashboardRightPanel from "@/components/Dashboard/DashboardRightPanel";
+import DashboardInfoPanel from "@/components/Dashboard/DashboardInfoPanel";
 
 type Props = {
   active: boolean;
