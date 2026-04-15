@@ -73,6 +73,7 @@ export default function Home() {
   const [tablesProducts, setTablesProducts] = useState<string[]>([]);
   const [dashboardProduct, setDashboardProduct] = useState<string | null>(null);
   const [dashboardInfoOpen, setDashboardInfoOpen] = useState(false);
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
 
   const toggleChartsProduct = (p: string) => {
     setChartsProducts((prev) => {
@@ -281,6 +282,17 @@ export default function Home() {
               >
                 glossary
               </button>
+              <button
+                onClick={() => setRightPanelCollapsed((v) => !v)}
+                className="border border-neutral-600 bg-[#2a2d31] text-neutral-300 hover:text-neutral-100 hover:border-neutral-400 px-2 py-1 text-xs transition-colors flex-none"
+                aria-label={
+                  rightPanelCollapsed
+                    ? "Show right panel"
+                    : "Hide right panel"
+                }
+              >
+                {rightPanelCollapsed ? "show panel" : "hide panel"}
+              </button>
             </>
           )}
           <div className="flex-1 min-w-0" />
@@ -481,6 +493,7 @@ export default function Home() {
         onSelectProduct={setDashboardProduct}
         infoOpen={dashboardInfoOpen}
         onInfoOpenChange={setDashboardInfoOpen}
+        rightPanelCollapsed={rightPanelCollapsed}
       />
 
       <HistoricalView active={tab === "historical"} />

@@ -1,11 +1,12 @@
 "use client";
 
 import { ParsedLog } from "@/lib/types";
+import type { SpreadType, VolumeType } from "@/lib/bookMath";
 import DashboardLogViewer from "@/components/DashboardLogViewer";
 import type { Normalizer } from "@/components/DashboardUPlotChart";
 import type { LevelKey, TradeKey, OrderKey, PnlStats } from "@/components/DashboardView";
 
-type TradeShape = "square" | "triangleUp" | "triangleDown";
+type TradeShape = "square" | "triangleUp" | "triangleDown" | "star";
 
 const LEVEL_ORDER: { key: LevelKey; label: string; color: string }[] = [
   { key: "ask3", label: "Ask 3", color: "rgba(239, 68, 68, 0.35)" },
@@ -29,8 +30,14 @@ const TRADE_ORDER: {
   { key: "mySell", label: "My Sells", color: "#fbbf24", shape: "triangleDown" },
 ];
 
-const ORDER_ORDER: { key: OrderKey; label: string; color: string }[] = [
-  { key: "ownOrders", label: "Own Orders", color: "#86efac" },
+const ORDER_ORDER: {
+  key: OrderKey;
+  label: string;
+  color: string;
+  shape: TradeShape;
+}[] = [
+  { key: "myBids", label: "My Bids", color: "#86efac", shape: "star" },
+  { key: "myAsks", label: "My Asks", color: "#fca5a5", shape: "star" },
 ];
 
 function TradeShapeIcon({
@@ -54,6 +61,18 @@ function TradeShapeIcon({
       </svg>
     );
   }
+  if (shape === "star") {
+    return (
+      <svg width="10" height="10" viewBox="0 0 12 12" className="flex-none">
+        <polygon
+          points="6,1 7.47,4.37 11.12,4.73 8.4,7.19 9.24,10.77 6,8.9 2.76,10.77 3.6,7.19 0.88,4.73 4.53,4.37"
+          fill={color}
+          stroke="#2a2d31"
+          strokeWidth="0.5"
+        />
+      </svg>
+    );
+  }
   return (
     <svg width="10" height="10" viewBox="0 0 12 12" className="flex-none">
       <polygon points="6,1 11,11 1,11" fill={color} stroke="#2a2d31" strokeWidth="1" />
@@ -61,24 +80,33 @@ function TradeShapeIcon({
   );
 }
 
+type PanelKey = "pnl" | "position";
+
 type Props = {
   parsed: ParsedLog | null;
   selectedProduct: string | null;
   onSelectProduct: (p: string) => void;
   normalizer: Normalizer;
   onSelectNormalizer: (n: Normalizer) => void;
+  spreadType: SpreadType | "off";
+  onSelectSpreadType: (t: SpreadType | "off") => void;
+  volumeType: VolumeType | "off";
+  onSelectVolumeType: (t: VolumeType | "off") => void;
   visibleLevels: Record<LevelKey, boolean>;
   onToggleLevel: (k: LevelKey) => void;
   visibleTrades: Record<TradeKey, boolean>;
   onToggleTrade: (k: TradeKey) => void;
   visibleOrders: Record<OrderKey, boolean>;
   onToggleOrder: (k: OrderKey) => void;
+  visiblePanels: { pnl: boolean; position: boolean };
+  onTogglePanel: (k: PanelKey) => void;
   qtyMin: number;
   qtyMax: number | null;
   maxTradeQty: number;
   onQtyMinChange: (n: number) => void;
   onQtyMaxChange: (n: number | null) => void;
   pnlStats: PnlStats;
+  skippedPnlTicks: number;
   hoveredTime: number | null;
 };
 
@@ -88,18 +116,25 @@ export default function DashboardRightPanel({
   onSelectProduct,
   normalizer,
   onSelectNormalizer,
+  spreadType,
+  onSelectSpreadType,
+  volumeType,
+  onSelectVolumeType,
   visibleLevels,
   onToggleLevel,
   visibleTrades,
   onToggleTrade,
   visibleOrders,
   onToggleOrder,
+  visiblePanels,
+  onTogglePanel,
   qtyMin,
   qtyMax,
   maxTradeQty,
   onQtyMinChange,
   onQtyMaxChange,
   pnlStats,
+  skippedPnlTicks,
   hoveredTime,
 }: Props) {
   const products = parsed?.products ?? [];
@@ -177,6 +212,93 @@ export default function DashboardRightPanel({
           </select>
         </div>
 
+        <div className="flex items-center gap-2">
+          <span className="text-neutral-400 text-[11px] w-16 flex-none">
+            Spread
+          </span>
+          <select
+            value={spreadType}
+            onChange={(e) =>
+              onSelectSpreadType(e.target.value as SpreadType | "off")
+            }
+            className="flex-1 min-w-0 border border-neutral-600 bg-[#1f2125] text-neutral-200 px-2 py-1 text-[11px] focus:border-neutral-300 focus:outline-none"
+          >
+            <option value="off" className="bg-[#1f2125]">
+              Off
+            </option>
+            <option value="absolute" className="bg-[#1f2125]">
+              Absolute
+            </option>
+            <option value="wall" className="bg-[#1f2125]">
+              Wall
+            </option>
+          </select>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="text-neutral-400 text-[11px] w-16 flex-none">
+            Volume
+          </span>
+          <select
+            value={volumeType}
+            onChange={(e) =>
+              onSelectVolumeType(e.target.value as VolumeType | "off")
+            }
+            className="flex-1 min-w-0 border border-neutral-600 bg-[#1f2125] text-neutral-200 px-2 py-1 text-[11px] focus:border-neutral-300 focus:outline-none"
+          >
+            <option value="off" className="bg-[#1f2125]">
+              Off
+            </option>
+            <option value="obi" className="bg-[#1f2125]">
+              OBI (imbalance ratio)
+            </option>
+            <option value="totalDepth" className="bg-[#1f2125]">
+              Total Depth
+            </option>
+            <option value="ownTrade" className="bg-[#1f2125]">
+              Own Trade Volume
+            </option>
+            <option value="signedDepth" className="bg-[#1f2125]">
+              Signed Depth (3 levels)
+            </option>
+            <option value="topOfBook" className="bg-[#1f2125]">
+              Top of Book
+            </option>
+          </select>
+        </div>
+
+        <div>
+          <div className="text-neutral-500 text-[10px] uppercase tracking-wide mb-1">
+            Panels
+          </div>
+          <div className="flex flex-wrap gap-1">
+            <PanelToggle
+              label="P&L"
+              on={visiblePanels.pnl}
+              onClick={() => onTogglePanel("pnl")}
+            />
+            <PanelToggle
+              label="Position"
+              on={visiblePanels.position}
+              onClick={() => onTogglePanel("position")}
+            />
+            <PanelToggle
+              label="Spread"
+              on={spreadType !== "off"}
+              onClick={() =>
+                onSelectSpreadType(spreadType === "off" ? "absolute" : "off")
+              }
+            />
+            <PanelToggle
+              label="Volume"
+              on={volumeType !== "off"}
+              onClick={() =>
+                onSelectVolumeType(volumeType === "off" ? "obi" : "off")
+              }
+            />
+          </div>
+        </div>
+
         <div className="pt-1">
           <div className="text-neutral-500 text-[10px] uppercase tracking-wide mb-1">
             Levels
@@ -235,7 +357,7 @@ export default function DashboardRightPanel({
             Orders
           </div>
           <div className="flex flex-wrap gap-1">
-            {ORDER_ORDER.map(({ key, label, color }) => {
+            {ORDER_ORDER.map(({ key, label, color, shape }) => {
               const isOn = visibleOrders[key];
               return (
                 <button
@@ -247,10 +369,7 @@ export default function DashboardRightPanel({
                       : "border-neutral-600 bg-[#1f2125] text-neutral-500 hover:text-neutral-200"
                   }`}
                 >
-                  <span
-                    className="inline-block w-2.5 h-2.5 rounded-full border flex-none"
-                    style={{ borderColor: color }}
-                  />
+                  <TradeShapeIcon shape={shape} color={color} />
                   {label}
                 </button>
               );
@@ -331,7 +450,7 @@ export default function DashboardRightPanel({
 
       <div className="flex-1 min-h-0 grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] border-t border-neutral-600">
         <div className="min-h-0 min-w-0 border-r border-neutral-600 flex flex-col">
-          <StatsSection stats={pnlStats} />
+          <StatsSection stats={pnlStats} skippedPnlTicks={skippedPnlTicks} />
         </div>
         <div className="min-h-0 min-w-0 flex flex-col">
           <DashboardLogViewer
@@ -344,7 +463,13 @@ export default function DashboardRightPanel({
   );
 }
 
-function StatsSection({ stats }: { stats: PnlStats }) {
+function StatsSection({
+  stats,
+  skippedPnlTicks,
+}: {
+  stats: PnlStats;
+  skippedPnlTicks: number;
+}) {
   const fmt = (n: number) =>
     n.toLocaleString(undefined, { maximumFractionDigits: 2 });
   const fmtSigned = (n: number) => (n >= 0 ? "+" : "") + fmt(n);
@@ -397,6 +522,17 @@ function StatsSection({ stats }: { stats: PnlStats }) {
             value means the session finished below its starting point.
           </div>
         </div>
+        {skippedPnlTicks > 0 && (
+          <div className="border-t border-neutral-700 pt-2 text-neutral-500 text-[10px] leading-snug">
+            <span className="text-amber-300">
+              {skippedPnlTicks} bad tick{skippedPnlTicks === 1 ? "" : "s"} skipped
+            </span>
+            <div className="text-neutral-600 text-[9px] mt-1">
+              Backtester reported mid=0 on these ticks, producing phantom PnL
+              spikes. Excluded from chart and stats.
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -425,5 +561,28 @@ function Stat({
         {value}
       </span>
     </div>
+  );
+}
+
+function PanelToggle({
+  label,
+  on,
+  onClick,
+}: {
+  label: string;
+  on: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`border px-1.5 py-0.5 text-[10px] transition-colors ${
+        on
+          ? "border-neutral-300 bg-neutral-700 text-neutral-100"
+          : "border-neutral-600 bg-[#1f2125] text-neutral-500 hover:text-neutral-200"
+      }`}
+    >
+      {label}
+    </button>
   );
 }

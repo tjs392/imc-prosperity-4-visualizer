@@ -9,9 +9,14 @@ type DataPoint = { time: number; value: number };
 
 type Props = {
   data: DataPoint[];
+  data2?: DataPoint[];
   label: string;
   color: string;
+  color2?: string;
   valueLabel?: string;
+  valueLabel2?: string;
+  fillArea?: boolean;
+  zeroLine?: boolean;
   step?: boolean;
   height?: number;
   formatValue?: (v: number) => string;
@@ -21,9 +26,14 @@ type Props = {
 
 export default function DashboardUPlotPanelChart({
   data,
+  data2,
   label,
   color,
+  color2,
   valueLabel = "value",
+  valueLabel2 = "value2",
+  fillArea = false,
+  zeroLine = false,
   step = false,
   height = 160,
   formatValue,
@@ -37,38 +47,72 @@ export default function DashboardUPlotPanelChart({
   formatValueRef.current = formatValue;
   const valueLabelRef = useRef(valueLabel);
   valueLabelRef.current = valueLabel;
+  const valueLabel2Ref = useRef(valueLabel2);
+  valueLabel2Ref.current = valueLabel2;
+  const hasSecond = data2 !== undefined;
 
   const alignedData = useMemo<AlignedData>(() => {
-    if (!data || data.length === 0) {
-      return [[], []] as unknown as AlignedData;
+    const map1 = new Map<number, number>();
+    for (const d of data) map1.set(d.time, d.value);
+    const map2 = new Map<number, number>();
+    if (hasSecond && data2) for (const d of data2) map2.set(d.time, d.value);
+    const times = new Set<number>();
+    for (const t of map1.keys()) times.add(t);
+    for (const t of map2.keys()) times.add(t);
+    if (times.size === 0) {
+      return hasSecond
+        ? ([[], [], []] as unknown as AlignedData)
+        : ([[], []] as unknown as AlignedData);
     }
-    const byTime = new Map<number, number>();
-    for (const d of data) byTime.set(d.time, d.value);
-    const xs = Array.from(byTime.keys()).sort((a, b) => a - b);
-    const ys = xs.map((t) => byTime.get(t) as number);
-    return [xs, ys] as AlignedData;
-  }, [data]);
+    const xs = Array.from(times).sort((a, b) => a - b);
+    const ys1 = xs.map((t) => (map1.has(t) ? (map1.get(t) as number) : null));
+    if (!hasSecond) return [xs, ys1] as unknown as AlignedData;
+    const ys2 = xs.map((t) => (map2.has(t) ? (map2.get(t) as number) : null));
+    return [xs, ys1, ys2] as unknown as AlignedData;
+  }, [data, data2, hasSecond]);
 
   useEffect(() => {
     if (!containerRef.current) return;
 
     const stepLeft = step ? uPlot.paths.stepped!({ align: -1 }) : undefined;
 
+    const makeFillTo = (): ((u: uPlot, seriesIdx: number) => number) => {
+      return (u) => u.valToPos(0, "y", true);
+    };
+
+    const series: Options["series"] = [
+      {},
+      {
+        label: valueLabel,
+        stroke: color,
+        width: 2,
+        paths: stepLeft,
+        points: { show: false },
+        spanGaps: false,
+        ...(fillArea
+          ? { fill: color + "55", fillTo: makeFillTo() }
+          : {}),
+      },
+    ];
+    if (hasSecond) {
+      series.push({
+        label: valueLabel2,
+        stroke: color2 ?? color,
+        width: 2,
+        paths: stepLeft,
+        points: { show: false },
+        spanGaps: false,
+        ...(fillArea
+          ? { fill: (color2 ?? color) + "55", fillTo: makeFillTo() }
+          : {}),
+      });
+    }
+
     const opts: Options = {
       width: containerRef.current.clientWidth,
       height,
       plugins: [wheelZoomPlugin(0.75), scaleSyncPlugin(syncKey)],
-      series: [
-        {},
-        {
-          label: valueLabel,
-          stroke: color,
-          width: 2,
-          paths: stepLeft,
-          points: { show: false },
-          spanGaps: false,
-        },
-      ],
+      series,
       cursor: {
         show: true,
         x: true,
@@ -106,6 +150,26 @@ export default function DashboardUPlotPanelChart({
         },
       ],
       hooks: {
+        draw: zeroLine
+          ? [
+              (u) => {
+                const ctx = u.ctx;
+                const y = u.valToPos(0, "y", true);
+                const left = u.bbox.left;
+                const right = left + u.bbox.width;
+                if (y < u.bbox.top || y > u.bbox.top + u.bbox.height) return;
+                ctx.save();
+                ctx.strokeStyle = "rgba(212,212,212,0.4)";
+                ctx.lineWidth = 1;
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath();
+                ctx.moveTo(left, y);
+                ctx.lineTo(right, y);
+                ctx.stroke();
+                ctx.restore();
+              },
+            ]
+          : [],
         setCursor: [
           (u) => {
             const tt = tooltipRef.current;
@@ -120,29 +184,48 @@ export default function DashboardUPlotPanelChart({
 
             const xVal = u.data[0][idx];
             const yVal = u.data[1][idx];
+            const yVal2 = hasSecond ? u.data[2]?.[idx] : undefined;
+            const y1Valid =
+              yVal !== null && yVal !== undefined;
+            const y2Valid =
+              hasSecond && yVal2 !== null && yVal2 !== undefined;
             if (
               xVal === null ||
               xVal === undefined ||
-              yVal === null ||
-              yVal === undefined
+              (!y1Valid && !y2Valid)
             ) {
               tt.style.display = "none";
               return;
             }
 
             const fv = formatValueRef.current;
-            const valueStr = fv
-              ? fv(yVal as number)
-              : (yVal as number).toFixed(2);
+            const fmt = (v: number) => (fv ? fv(v) : v.toFixed(2));
 
+            const rows: string[] = [];
+            rows.push(
+              `<div style="font-size:10px;color:#737373">${xVal}</div>`
+            );
+            if (y1Valid) {
+              rows.push(
+                `<div style="font-size:11px;color:${color};font-family:ui-monospace,monospace">${valueLabelRef.current}: ${fmt(
+                  yVal as number
+                )}</div>`
+              );
+            }
+            if (y2Valid) {
+              rows.push(
+                `<div style="font-size:11px;color:${
+                  color2 ?? color
+                };font-family:ui-monospace,monospace">${valueLabel2Ref.current}: ${fmt(
+                  yVal2 as number
+                )}</div>`
+              );
+            }
             tt.style.display = "block";
-            tt.innerHTML = `
-              <div style="font-size:10px;color:#737373">${xVal}</div>
-              <div style="font-size:11px;color:#f5f5f5;font-family:ui-monospace,monospace">${valueLabelRef.current}: ${valueStr}</div>
-            `;
+            tt.innerHTML = rows.join("");
 
             const containerRect = container.getBoundingClientRect();
-            const tooltipWidth = 140;
+            const tooltipWidth = 160;
             const cursorLeft = u.cursor.left ?? 0;
             const cursorTop = u.cursor.top ?? 0;
             let left = cursorLeft + 12;
@@ -181,12 +264,33 @@ export default function DashboardUPlotPanelChart({
       plotRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [height, color, step, syncKey]);
+  }, [height, color, color2, step, syncKey, hasSecond, fillArea, zeroLine]);
 
   useEffect(() => {
     const plot = plotRef.current;
     if (!plot) return;
-    plot.setData(alignedData);
+    plot.setData(alignedData, false);
+    let yMin = Infinity;
+    let yMax = -Infinity;
+    for (let s = 1; s < alignedData.length; s++) {
+      const arr = alignedData[s] as (number | null)[];
+      for (const v of arr) {
+        if (v === null || v === undefined) continue;
+        if (v < yMin) yMin = v;
+        if (v > yMax) yMax = v;
+      }
+    }
+    if (Number.isFinite(yMin) && Number.isFinite(yMax)) {
+      if (yMin === yMax) {
+        yMin -= 1;
+        yMax += 1;
+      } else {
+        const pad = (yMax - yMin) * 0.05;
+        yMin -= pad;
+        yMax += pad;
+      }
+      plot.setScale("y", { min: yMin, max: yMax });
+    }
   }, [alignedData]);
 
   useEffect(() => {
@@ -195,7 +299,7 @@ export default function DashboardUPlotPanelChart({
   }, [resetSignal]);
 
   return (
-    <div className="border border-neutral-600 bg-[#2a2d31] relative min-w-0 flex-none">
+    <div className="border border-neutral-600 bg-[#2a2d31] relative min-w-0 flex-none overflow-hidden">
       <div className="flex items-center justify-between border-b border-neutral-600 px-3 py-1.5">
         <span className="text-neutral-100 text-xs font-semibold">{label}</span>
       </div>

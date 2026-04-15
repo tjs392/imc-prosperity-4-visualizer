@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { ParsedLog, ActivityRow, Trade } from "@/lib/types";
+import { computeSpreadSeries, SpreadType, computeVolumeSeries, VolumeType } from "@/lib/bookMath";
 import DashboardUPlotChart from "@/components/DashboardUPlotChart";
 import type { Normalizer, QtyFilter } from "@/components/DashboardUPlotChart";
 import DashboardUPlotPanelChart from "@/components/DashboardUPlotPanelChart";
@@ -16,11 +17,12 @@ type Props = {
   onSelectProduct: (p: string | null) => void;
   infoOpen: boolean;
   onInfoOpenChange: (v: boolean) => void;
+  rightPanelCollapsed: boolean;
 };
 
 export type LevelKey = "bid1" | "bid2" | "bid3" | "ask1" | "ask2" | "ask3" | "mid";
 export type TradeKey = "botMaker" | "botTaker" | "myBuy" | "mySell";
-export type OrderKey = "ownOrders";
+export type OrderKey = "myBids" | "myAsks";
 
 function computePositions(
   trades: Trade[],
@@ -104,21 +106,28 @@ export default function DashboardView({
   onSelectProduct,
   infoOpen,
   onInfoOpenChange,
+  rightPanelCollapsed,
 }: Props) {
   const setSelectedProduct = onSelectProduct;
   const setInfoOpen = onInfoOpenChange;
   const [resetSignal, setResetSignal] = useState(0);
   const [hoveredTime, setHoveredTime] = useState<number | null>(null);
   const [normalizer, setNormalizer] = useState<Normalizer>("none");
+  const [spreadType, setSpreadType] = useState<SpreadType | "off">("off");
+  const [volumeType, setVolumeType] = useState<VolumeType | "off">("off");
+  const [visiblePanels, setVisiblePanels] = useState({
+    pnl: true,
+    position: true,
+  });
   const [qtyMin, setQtyMin] = useState(0);
   const [qtyMax, setQtyMax] = useState<number | null>(null);
   const [visibleLevels, setVisibleLevels] = useState<Record<LevelKey, boolean>>({
     bid1: true,
-    bid2: true,
-    bid3: true,
+    bid2: false,
+    bid3: false,
     ask1: true,
-    ask2: true,
-    ask3: true,
+    ask2: false,
+    ask3: false,
     mid: true,
   });
   const [visibleTrades, setVisibleTrades] = useState<Record<TradeKey, boolean>>(
@@ -131,7 +140,8 @@ export default function DashboardView({
   );
   const [visibleOrders, setVisibleOrders] = useState<Record<OrderKey, boolean>>(
     {
-      ownOrders: true,
+      myBids: false,
+      myAsks: false,
     }
   );
 
@@ -168,21 +178,58 @@ export default function DashboardView({
   }, [parsed, selectedProduct]);
 
   const pnlData = useMemo(() => {
-    if (!productObj) return [];
-    return productObj.rows
-      .map((r) => ({ time: r.timestamp, value: r.pnl }))
-      .filter(
-        (d): d is { time: number; value: number } =>
-          d.value !== null && Number.isFinite(d.value)
-      );
-  }, [productObj]);
+    if (!productObj) return { data: [], skipped: 0 };
+    const badTs = new Set<number>();
+    for (const r of activityRows) {
+      if (r.midPrice === null || r.midPrice === 0) {
+        badTs.add(r.timestamp);
+      }
+    }
+    let skipped = 0;
+    const data: { time: number; value: number }[] = [];
+    for (const r of productObj.rows) {
+      if (r.pnl === null || !Number.isFinite(r.pnl)) continue;
+      if (badTs.has(r.timestamp)) {
+        skipped++;
+        continue;
+      }
+      data.push({ time: r.timestamp, value: r.pnl });
+    }
+    return { data, skipped };
+  }, [productObj, activityRows]);
 
   const positionData = useMemo(() => {
     if (!parsed || !productObj) return [];
     return computePositions(parsed.trades, productObj.product);
   }, [parsed, productObj]);
 
-  const pnlStats = useMemo(() => computePnlStats(pnlData), [pnlData]);
+  const pnlStats = useMemo(() => computePnlStats(pnlData.data), [pnlData]);
+
+  const spreadData = useMemo(() => {
+    if (spreadType === "off" || activityRows.length === 0) return [];
+    return computeSpreadSeries(activityRows, spreadType);
+  }, [activityRows, spreadType]);
+
+  const volumeData = useMemo(() => {
+    if (volumeType === "off" || !parsed || !productObj) return null;
+    return computeVolumeSeries(
+      activityRows,
+      parsed.trades,
+      productObj.product,
+      volumeType
+    );
+  }, [activityRows, parsed, productObj, volumeType]);
+
+  const volumeDualSplit = useMemo(() => {
+    if (!volumeData || volumeData.kind !== "dual") return null;
+    const bids: { time: number; value: number }[] = [];
+    const asks: { time: number; value: number }[] = [];
+    for (const d of volumeData.data) {
+      bids.push({ time: d.time, value: d.bids });
+      asks.push({ time: d.time, value: d.asks });
+    }
+    return { bids, asks };
+  }, [volumeData]);
 
   const maxTradeQty = useMemo(() => {
     if (!parsed || !productObj) return 0;
@@ -202,10 +249,10 @@ export default function DashboardView({
 
   return (
     <div
-      className="h-[calc(100vh-44px)] overflow-y-auto overflow-x-hidden"
+      className="min-h-[calc(100vh-44px)] overflow-x-hidden"
       style={{ display: active ? undefined : "none" }}
     >
-      <div className="p-2 flex flex-col h-full min-h-0 min-w-0">
+      <div className="p-2 flex flex-col min-h-full min-w-0">
         {!parsed && !loading && (
           <p className="text-neutral-500 text-xs">No log loaded.</p>
         )}
@@ -214,15 +261,21 @@ export default function DashboardView({
         )}
 
         {parsed && productObj && (
-          <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,6fr)_minmax(0,4fr)] gap-2 flex-1 min-h-0 min-w-0">
-            <div className="flex flex-col gap-2 min-h-0 min-w-0">
+          <div
+            className={`grid grid-cols-1 gap-2 flex-1 min-w-0 ${
+              rightPanelCollapsed
+                ? ""
+                : "lg:grid-cols-[minmax(0,6fr)_minmax(0,4fr)]"
+            }`}
+          >
+            <div className="flex flex-col gap-2 min-w-0">
               <DashboardUPlotChart
                 rows={activityRows}
                 trades={parsed.trades}
                 sandbox={parsed.sandbox}
                 product={productObj.product}
                 label={`Order Book - ${productObj.product}`}
-                minHeight={240}
+                minHeight="min(500px, 50vh)"
                 visibleLevels={visibleLevels}
                 visibleTrades={visibleTrades}
                 visibleOrders={visibleOrders}
@@ -235,53 +288,124 @@ export default function DashboardView({
                 onResetRequest={() => setResetSignal((n) => n + 1)}
                 onHoverTime={setHoveredTime}
               />
-              <DashboardUPlotPanelChart
-                data={pnlData}
-                label={`Profit / Loss - ${productObj.product}`}
-                color="#a3e635"
-                valueLabel="pnl"
-                height={120}
-                formatValue={(v) => v.toFixed(0)}
-                resetSignal={resetSignal}
-              />
-              <DashboardUPlotPanelChart
-                data={positionData}
-                label={`Position - ${productObj.product}`}
-                color="#60a5fa"
-                valueLabel="pos"
-                step
-                height={120}
-                formatValue={(v) => v.toFixed(0)}
-                resetSignal={resetSignal}
-              />
+              {visiblePanels.pnl && (
+                <DashboardUPlotPanelChart
+                  data={pnlData.data}
+                  label={`Profit / Loss - ${productObj.product}`}
+                  color="#a3e635"
+                  valueLabel="pnl"
+                  height={120}
+                  formatValue={(v) => v.toFixed(0)}
+                  resetSignal={resetSignal}
+                />
+              )}
+              {visiblePanels.position && (
+                <DashboardUPlotPanelChart
+                  data={positionData}
+                  label={`Position - ${productObj.product}`}
+                  color="#60a5fa"
+                  valueLabel="pos"
+                  step
+                  height={120}
+                  formatValue={(v) => v.toFixed(0)}
+                  resetSignal={resetSignal}
+                />
+              )}
+              {spreadType !== "off" && (
+                <DashboardUPlotPanelChart
+                  data={spreadData}
+                  label={`Spread (${spreadLabel(spreadType)}) - ${productObj.product}`}
+                  color="#f59e0b"
+                  valueLabel="spread"
+                  height={120}
+                  formatValue={(v) => v.toFixed(2)}
+                  resetSignal={resetSignal}
+                />
+              )}
+              {volumeData !== null &&
+                (volumeData.kind === "single" ? (
+                  <DashboardUPlotPanelChart
+                    data={volumeData.data}
+                    label={`Volume (${volumeLabel(volumeType)}) - ${productObj.product}`}
+                    color="#c084fc"
+                    valueLabel={volumeLabel(volumeType)}
+                    height={120}
+                    fillArea
+                    zeroLine={volumeType === "obi"}
+                    formatValue={(v) =>
+                      volumeType === "obi" ? v.toFixed(3) : v.toFixed(0)
+                    }
+                    resetSignal={resetSignal}
+                  />
+                ) : volumeDualSplit !== null ? (
+                  <DashboardUPlotPanelChart
+                    data={volumeDualSplit.bids}
+                    data2={volumeDualSplit.asks}
+                    label={`Volume (${volumeLabel(volumeType)}) - ${productObj.product}`}
+                    color="#60a5fa"
+                    color2="#ef4444"
+                    valueLabel="bid"
+                    valueLabel2="ask"
+                    height={120}
+                    fillArea
+                    zeroLine
+                    formatValue={(v) => Math.abs(v).toFixed(0)}
+                    resetSignal={resetSignal}
+                  />
+                ) : null)}
             </div>
 
-            <div className="h-full min-h-0 min-w-0 hidden lg:block">
-              <DashboardRightPanel
+            {!rightPanelCollapsed && (
+              <div className="h-full min-h-0 min-w-0 hidden lg:block">
+                <DashboardRightPanel
                 parsed={parsed}
                 selectedProduct={selectedProduct}
                 onSelectProduct={setSelectedProduct}
                 normalizer={normalizer}
                 onSelectNormalizer={setNormalizer}
+                spreadType={spreadType}
+                onSelectSpreadType={setSpreadType}
+                volumeType={volumeType}
+                onSelectVolumeType={setVolumeType}
                 visibleLevels={visibleLevels}
                 onToggleLevel={toggleLevel}
                 visibleTrades={visibleTrades}
                 onToggleTrade={toggleTrade}
                 visibleOrders={visibleOrders}
                 onToggleOrder={toggleOrder}
+                visiblePanels={visiblePanels}
+                onTogglePanel={(k) =>
+                  setVisiblePanels((prev) => ({ ...prev, [k]: !prev[k] }))
+                }
                 qtyMin={qtyMin}
                 qtyMax={qtyMax}
                 maxTradeQty={maxTradeQty}
                 onQtyMinChange={setQtyMin}
                 onQtyMaxChange={setQtyMax}
                 pnlStats={pnlStats}
+                skippedPnlTicks={pnlData.skipped}
                 hoveredTime={hoveredTime}
               />
-            </div>
+              </div>
+            )}
           </div>
         )}
       </div>
       <DashboardInfoPanel open={infoOpen} onClose={() => setInfoOpen(false)} />
     </div>
   );
+}
+
+function spreadLabel(t: SpreadType): string {
+  if (t === "absolute") return "abs";
+  return "wall";
+}
+
+function volumeLabel(t: VolumeType | "off"): string {
+  if (t === "obi") return "OBI";
+  if (t === "totalDepth") return "total";
+  if (t === "ownTrade") return "own";
+  if (t === "signedDepth") return "signed";
+  if (t === "topOfBook") return "top";
+  return "off";
 }

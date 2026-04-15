@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef } from "react";
 import uPlot, { AlignedData, Options, Series } from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { ActivityRow, Trade, SandboxEntry } from "@/lib/types";
+import { computeWallMidSeries } from "@/lib/bookMath";
 import { wheelZoomPlugin, resetUPlotX, scaleSyncPlugin, registerScaleSync, unregisterScaleSync } from "@/lib/uplotPlugins";
 
 export type Normalizer = "none" | "wallMid";
@@ -15,7 +16,7 @@ type Props = {
   sandbox: SandboxEntry[];
   product: string;
   label: string;
-  minHeight?: number;
+  minHeight?: number | string;
   visibleLevels: {
     bid1: boolean;
     bid2: boolean;
@@ -32,7 +33,8 @@ type Props = {
     mySell: boolean;
   };
   visibleOrders: {
-    ownOrders: boolean;
+    myBids: boolean;
+    myAsks: boolean;
   };
   normalizer?: Normalizer;
   qtyFilter?: QtyFilter;
@@ -104,50 +106,6 @@ function dedupeRows(rows: ActivityRow[]): DedupedBook {
     }
   }
   return { xs, bid1, bid2, bid3, ask1, ask2, ask3, mid };
-}
-
-function pickWall(
-  prices: (number | null)[],
-  volumes: (number | null)[]
-): number | null {
-  let bestPrice: number | null = null;
-  let bestVol = -1;
-  for (let i = 0; i < prices.length; i++) {
-    const p = prices[i];
-    const v = volumes[i];
-    if (p === null || p === undefined || v === null || v === undefined) continue;
-    if (v > bestVol) {
-      bestVol = v;
-      bestPrice = p;
-    }
-  }
-  return bestPrice;
-}
-
-function computeWallMidSeries(rows: ActivityRow[]): (number | null)[] {
-  const byTime = new Map<number, ActivityRow>();
-  for (const r of rows) byTime.set(r.timestamp, r);
-  const sortedTimes = Array.from(byTime.keys()).sort((a, b) => a - b);
-  const out: (number | null)[] = [];
-  let last: number | null = null;
-  for (const t of sortedTimes) {
-    const r = byTime.get(t)!;
-    const bidWall = pickWall(
-      [r.bidPrice1, r.bidPrice2, r.bidPrice3],
-      [r.bidVolume1, r.bidVolume2, r.bidVolume3]
-    );
-    const askWall = pickWall(
-      [r.askPrice1, r.askPrice2, r.askPrice3],
-      [r.askVolume1, r.askVolume2, r.askVolume3]
-    );
-    let v: number | null = null;
-    if (bidWall !== null && askWall !== null) v = (bidWall + askWall) / 2;
-    else if (bidWall !== null) v = bidWall;
-    else if (askWall !== null) v = askWall;
-    if (v !== null) last = v;
-    out.push(v !== null ? v : last);
-  }
-  return out;
 }
 
 function applyNormalization(
@@ -276,7 +234,7 @@ function categorizeTrades(
   return { botMaker, botTakerBuy, botTakerSell, myBuy, mySell };
 }
 
-function firstIdxAtOrAfter(arr: TradeEvent[], target: number): number {
+function firstIdxAtOrAfter(arr: { t: number }[], target: number): number {
   let lo = 0;
   let hi = arr.length;
   while (lo < hi) {
@@ -382,6 +340,37 @@ function drawSquare(
   ctx.restore();
 }
 
+function drawStar(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  fill: string,
+  stroke: string
+) {
+  const spikes = 5;
+  const outer = size;
+  const inner = size * 0.45;
+  ctx.save();
+  ctx.fillStyle = fill;
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  let rot = -Math.PI / 2;
+  const step = Math.PI / spikes;
+  ctx.moveTo(x + Math.cos(rot) * outer, y + Math.sin(rot) * outer);
+  for (let i = 0; i < spikes; i++) {
+    rot += step;
+    ctx.lineTo(x + Math.cos(rot) * inner, y + Math.sin(rot) * inner);
+    rot += step;
+    ctx.lineTo(x + Math.cos(rot) * outer, y + Math.sin(rot) * outer);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
 export default function DashboardUPlotChart({
   rows,
   trades,
@@ -460,11 +449,32 @@ export default function DashboardUPlotChart({
   const tradeIndexesRef = useRef<TradeIndexes>(tradeIndexes);
   tradeIndexesRef.current = tradeIndexes;
 
+  const myFillKeys = useMemo(() => {
+    const buys = new Set<string>();
+    const sells = new Set<string>();
+    for (const ev of categorized.myBuy) buys.add(`${ev.t}:${ev.p}`);
+    for (const ev of categorized.mySell) sells.add(`${ev.t}:${ev.p}`);
+    return { buys, sells };
+  }, [categorized]);
+
   const categorizedOrders = useMemo(
     () => categorizeOrders(sandbox, product),
     [sandbox, product]
   );
   ordersRef.current = categorizedOrders;
+
+  const unfilledOrders = useMemo(() => {
+    return {
+      bids: categorizedOrders.bids.filter(
+        (ev) => !myFillKeys.buys.has(`${ev.t}:${ev.p}`)
+      ),
+      asks: categorizedOrders.asks.filter(
+        (ev) => !myFillKeys.sells.has(`${ev.t}:${ev.p}`)
+      ),
+    };
+  }, [categorizedOrders, myFillKeys]);
+  const unfilledOrdersRef = useRef<CategorizedOrders>(unfilledOrders);
+  unfilledOrdersRef.current = unfilledOrders;
 
   const alignedData = useMemo<AlignedData>(() => {
     return [
@@ -553,7 +563,7 @@ export default function DashboardUPlotChart({
 
     const opts: Options = {
       width: containerRef.current.clientWidth,
-      height: Math.max(minHeight, containerRef.current.clientHeight),
+      height: containerRef.current.clientHeight,
       plugins: [wheelZoomPlugin(0.75), scaleSyncPlugin(syncKey)],
       series,
       cursor: {
@@ -615,7 +625,7 @@ export default function DashboardUPlotChart({
             const qtyMax = qtyF ? qtyF.max : Infinity;
 
             const drawBucket = (
-              arr: TradeEvent[],
+              arr: { t: number; p: number; q: number }[],
               fn: (
                 c: CanvasRenderingContext2D,
                 x: number,
@@ -646,6 +656,24 @@ export default function DashboardUPlotChart({
                 fn(ctx, xPos, yPos);
               }
             };
+
+            const visO = visibleOrdersRef.current;
+            const { bids: unfilledBids, asks: unfilledAsks } =
+              unfilledOrdersRef.current;
+            if (visO.myBids) {
+              clip();
+              drawBucket(unfilledBids, (c, x, y) =>
+                drawStar(c, x, y, 7, OWN_ORDER_BID_COLOR, "#2a2d31")
+              );
+              unclip();
+            }
+            if (visO.myAsks) {
+              clip();
+              drawBucket(unfilledAsks, (c, x, y) =>
+                drawStar(c, x, y, 7, OWN_ORDER_ASK_COLOR, "#2a2d31")
+              );
+              unclip();
+            }
 
             if (visT.botMaker) {
               clip();
@@ -857,21 +885,24 @@ export default function DashboardUPlotChart({
 
             const orderRows: string[] = [];
             const visO = visibleOrdersRef.current;
-            const { bids: ownBids, asks: ownAsks } = ordersRef.current;
-            if (visO.ownOrders) {
-              for (const ev of ownBids) {
-                if (ev.t === xTs) {
-                  orderRows.push(
-                    `<div style="font-size:10px;font-family:ui-monospace,monospace;color:${OWN_ORDER_BID_COLOR}">ORD BID ${ev.q} @ ${ev.p}</div>`
-                  );
-                }
+            const { bids: unfilledBidsTt, asks: unfilledAsksTt } =
+              unfilledOrdersRef.current;
+            if (visO.myBids) {
+              for (const ev of unfilledBidsTt) {
+                if (ev.t !== xTs) continue;
+                if (!passQ(ev.q)) continue;
+                orderRows.push(
+                  `<div style="font-size:10px;font-family:ui-monospace,monospace;color:${OWN_ORDER_BID_COLOR}">ORD BID ${ev.q} @ ${fmtPrice(ev.p)}</div>`
+                );
               }
-              for (const ev of ownAsks) {
-                if (ev.t === xTs) {
-                  orderRows.push(
-                    `<div style="font-size:10px;font-family:ui-monospace,monospace;color:${OWN_ORDER_ASK_COLOR}">ORD ASK ${ev.q} @ ${ev.p}</div>`
-                  );
-                }
+            }
+            if (visO.myAsks) {
+              for (const ev of unfilledAsksTt) {
+                if (ev.t !== xTs) continue;
+                if (!passQ(ev.q)) continue;
+                orderRows.push(
+                  `<div style="font-size:10px;font-family:ui-monospace,monospace;color:${OWN_ORDER_ASK_COLOR}">ORD ASK ${ev.q} @ ${fmtPrice(ev.p)}</div>`
+                );
               }
             }
 
@@ -935,7 +966,7 @@ export default function DashboardUPlotChart({
       for (const entry of entries) {
         pendingSize = {
           width: entry.contentRect.width,
-          height: Math.max(minHeight, entry.contentRect.height),
+          height: entry.contentRect.height,
         };
       }
       if (sizeRaf === 0) {
@@ -962,7 +993,7 @@ export default function DashboardUPlotChart({
       plotRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [minHeight, syncKey]);
+  }, [syncKey]);
 
   const firstDataSkipRef = useRef(true);
   useEffect(() => {
@@ -999,7 +1030,7 @@ export default function DashboardUPlotChart({
   }, [resetSignal]);
 
   return (
-    <div className="border border-neutral-600 bg-[#2a2d31] relative flex flex-col min-h-0 min-w-0 flex-1">
+    <div className="border border-neutral-600 bg-[#2a2d31] relative flex flex-col min-w-0 flex-none overflow-hidden">
       <div className="flex items-center justify-between border-b border-neutral-600 px-3 py-1.5 flex-none">
         <span className="text-neutral-100 text-xs font-semibold">{label}</span>
         <button
@@ -1014,8 +1045,8 @@ export default function DashboardUPlotChart({
       </div>
       <div
         ref={containerRef}
-        style={{ width: "100%", minHeight }}
-        className="relative flex-1"
+        style={{ width: "100%", height: minHeight }}
+        className="relative"
       />
       <div
         ref={tooltipRef}
