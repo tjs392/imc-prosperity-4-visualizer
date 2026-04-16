@@ -112,6 +112,10 @@ export default function HistoricalView({ active }: Props) {
   const [source, setSource] = useState<"historical" | "simulated">("historical");
   const [simDays, setSimDays] = useState<number[]>([]);
   const [refreshSignal, setRefreshSignal] = useState(0);
+  const [hoveredTime, setHoveredTime] = useState<number | null>(null);
+  const [qtyMin, setQtyMin] = useState<number>(0);
+  const [qtyMax, setQtyMax] = useState<number | null>(null);
+  const [zoomRange, setZoomRange] = useState<{ min: number; max: number } | null>(null);
 
   useEffect(() => {
     try {
@@ -329,6 +333,37 @@ export default function HistoricalView({ active }: Props) {
     }
     return map;
   }, [loadedData]);
+
+  const maxTradeQty = useMemo(() => {
+    if (!loadedData) return 0;
+    let m = 0;
+    for (const t of loadedData.trades) {
+      const a = Math.abs(t.quantity);
+      if (a > m) m = a;
+    }
+    return m;
+  }, [loadedData]);
+
+  const qtyFilter = useMemo(
+    () => ({ min: qtyMin, max: qtyMax === null ? Infinity : qtyMax }),
+    [qtyMin, qtyMax]
+  );
+
+  const filteredTrades = useMemo(() => {
+    if (!loadedData) return [];
+    if (qtyMin === 0 && qtyMax === null) return loadedData.trades;
+    const max = qtyMax === null ? Infinity : qtyMax;
+    return loadedData.trades.filter((t) => {
+      const a = Math.abs(t.quantity);
+      return a >= qtyMin && a <= max;
+    });
+  }, [loadedData, qtyMin, qtyMax]);
+
+  // Clear the zoom range whenever the loaded dataset changes or reset is
+  // requested, so stats fall back to full-day until the user zooms again.
+  useEffect(() => {
+    setZoomRange(null);
+  }, [loadedData, resetSignal]);
 
   const xPlotLines = useMemo(() => {
     if (!loadedData) return undefined;
@@ -653,6 +688,9 @@ export default function HistoricalView({ active }: Props) {
                         xPlotLines={xPlotLines}
                         syncKey={HISTORICAL_SYNC_KEY}
                         resetSignal={resetSignal}
+                        onHoverTime={setHoveredTime}
+                        qtyFilter={qtyFilter}
+                        onXRangeChange={setZoomRange}
                       />
                     );
                   }
@@ -752,6 +790,17 @@ export default function HistoricalView({ active }: Props) {
                   round={selectedRound}
                   onClose={() => setShowPanel(false)}
                   onGenerated={() => setRefreshSignal((n) => n + 1)}
+                  activities={loadedData?.activities ?? []}
+                  trades={filteredTrades}
+                  allTrades={loadedData?.trades ?? []}
+                  hoveredTime={hoveredTime}
+                  selectedProduct={selectedProducts[0] ?? null}
+                  qtyMin={qtyMin}
+                  qtyMax={qtyMax}
+                  maxTradeQty={maxTradeQty}
+                  onQtyMinChange={setQtyMin}
+                  onQtyMaxChange={setQtyMax}
+                  zoomRange={zoomRange}
                 />
               </div>
             )}

@@ -339,16 +339,31 @@ export function OrderTable({
   );
 }
 
+/**
+ * Recent trades table.
+ *
+ * By default, tint by SUBMISSION side (dashboard/logs view behavior).
+ * Pass `classifyBySide=true` to tint by trade price vs mid at that timestamp
+ * instead (historical view behavior — no SUBMISSION concept there).
+ * When `classifyBySide` is enabled, `activities` must be supplied so we
+ * can look up the mid/bid/ask per timestamp+product. In that mode, the
+ * table also shows Mid / Best Bid / Best Ask / Spread columns instead of
+ * Buyer / Seller (which are always blank in historical data anyway).
+ */
 export function TradeTable({
   trades,
   timestamp,
   windowSize = 15,
   filterProducts,
+  classifyBySide = false,
+  activities,
 }: {
   trades: Trade[];
   timestamp: number | null;
   windowSize?: number;
   filterProducts?: string[] | null;
+  classifyBySide?: boolean;
+  activities?: ActivityRow[];
 }) {
   const ts = timestamp ?? Infinity;
   const hasFilter = filterProducts && filterProducts.length > 0;
@@ -356,23 +371,115 @@ export function TradeTable({
     .filter((t) => t.timestamp <= ts)
     .filter((t) => !hasFilter || filterProducts!.includes(t.symbol));
   const recent = upTo.slice(-windowSize).reverse();
-  return (
-    <SimpleTable
-      label={`Recent Trades (last ${windowSize})`}
-      columns={[
+
+  type BookSnap = {
+    mid: number | null;
+    bid: number | null;
+    ask: number | null;
+  };
+
+  // Lookup of full book snapshot per (ts, product). Skip one-sided rows for
+  // the mid (synthesized mids there are bogus) but still expose the single
+  // side we have so Best Bid / Best Ask columns still populate.
+  const snapByTs = (() => {
+    if (!classifyBySide || !activities) return null;
+    const m = new Map<string, BookSnap>();
+    for (const r of activities) {
+      const oneSided = r.bidPrice1 === null || r.askPrice1 === null;
+      m.set(`${r.timestamp}:${r.product}`, {
+        mid: oneSided ? null : r.midPrice,
+        bid: r.bidPrice1,
+        ask: r.askPrice1,
+      });
+    }
+    return m;
+  })();
+
+  const columns = classifyBySide
+    ? [
+        { header: "Symbol" },
+        { header: "Price", align: "right" as const },
+        { header: "Qty", align: "right" as const },
+        { header: "Mid", align: "right" as const },
+        { header: "Bid", align: "right" as const },
+        { header: "Ask", align: "right" as const },
+        { header: "Spread", align: "right" as const },
+        { header: "ts", align: "right" as const },
+      ]
+    : [
         { header: "Symbol" },
         { header: "Buyer" },
         { header: "Seller" },
-        { header: "Price", align: "right" },
-        { header: "Qty", align: "right" },
-        { header: "ts", align: "right" },
-      ]}
-      empty={recent.length === 0}
-    >
+        { header: "Price", align: "right" as const },
+        { header: "Qty", align: "right" as const },
+        { header: "ts", align: "right" as const },
+      ];
+
+  const label =
+    recent.length === windowSize
+      ? `Recent Trades (last ${windowSize})`
+      : `Recent Trades (${recent.length}/${windowSize})`;
+
+  return (
+    <SimpleTable label={label} columns={columns} empty={recent.length === 0}>
       {recent.map((t, i) => {
         let bg: string | undefined;
-        if (t.buyer === "SUBMISSION") bg = BID_TINT;
-        else if (t.seller === "SUBMISSION") bg = ASK_TINT;
+        const snap = snapByTs?.get(`${t.timestamp}:${t.symbol}`);
+        if (classifyBySide && snap) {
+          if (snap.mid !== null) {
+            if (t.price > snap.mid) bg = BID_TINT;
+            else if (t.price < snap.mid) bg = ASK_TINT;
+          }
+        } else {
+          if (t.buyer === "SUBMISSION") bg = BID_TINT;
+          else if (t.seller === "SUBMISSION") bg = ASK_TINT;
+        }
+
+        if (classifyBySide) {
+          const spread =
+            snap && snap.bid !== null && snap.ask !== null
+              ? snap.ask - snap.bid
+              : null;
+          const cell = (v: number | null | undefined) =>
+            v === null || v === undefined ? (
+              <span className="text-neutral-600">-</span>
+            ) : (
+              v
+            );
+          return (
+            <tr
+              key={i}
+              className="text-neutral-200"
+              style={bg ? { backgroundColor: bg } : undefined}
+            >
+              <td className="border-b border-neutral-800 px-2 py-1">
+                {t.symbol}
+              </td>
+              <td className="border-b border-neutral-800 px-2 py-1 text-right font-mono">
+                {t.price}
+              </td>
+              <td className="border-b border-neutral-800 px-2 py-1 text-right font-mono">
+                {t.quantity}
+              </td>
+              <td className="border-b border-neutral-800 px-2 py-1 text-right font-mono text-neutral-400">
+                {cell(snap?.mid)}
+              </td>
+              <td className="border-b border-neutral-800 px-2 py-1 text-right font-mono text-neutral-400">
+                {cell(snap?.bid)}
+              </td>
+              <td className="border-b border-neutral-800 px-2 py-1 text-right font-mono text-neutral-400">
+                {cell(snap?.ask)}
+              </td>
+              <td className="border-b border-neutral-800 px-2 py-1 text-right font-mono text-neutral-400">
+                {cell(spread)}
+              </td>
+              <td className="border-b border-neutral-800 px-2 py-1 text-right font-mono text-neutral-500">
+                {t.timestamp}
+              </td>
+            </tr>
+          );
+        }
+
         return (
           <tr
             key={i}

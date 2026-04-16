@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot, { AlignedData, Options } from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { ActivityRow, Trade } from "@/lib/types";
@@ -27,6 +27,9 @@ type Props = {
   xPlotLines?: XPlotLine[];
   syncKey?: string;
   resetSignal?: number;
+  onHoverTime?: (ts: number | null) => void;
+  qtyFilter?: { min: number; max: number };
+  onXRangeChange?: (range: { min: number; max: number } | null) => void;
 };
 
 const BID_COLORS = ["#16a34a", "#22c55e", "#4ade80"];
@@ -111,12 +114,25 @@ export default function HistoricalPriceChart({
   xPlotLines,
   syncKey = "historical",
   resetSignal = 0,
+  onHoverTime,
+  qtyFilter,
+  onXRangeChange,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
   const xPlotLinesRef = useRef(xPlotLines);
   xPlotLinesRef.current = xPlotLines;
+  const onHoverTimeRef = useRef(onHoverTime);
+  onHoverTimeRef.current = onHoverTime;
+  const onXRangeChangeRef = useRef(onXRangeChange);
+  onXRangeChangeRef.current = onXRangeChange;
+
+  // Freeze state: when true, the setCursor hook no-ops so the tooltip and
+  // hover emission stay pinned wherever they were when the user hit F.
+  const [frozen, setFrozen] = useState(false);
+  const frozenRef = useRef(frozen);
+  frozenRef.current = frozen;
 
   // Aligned book data (no trade column — trades are drawn as a hook overlay).
   const alignedData = useMemo<AlignedData>(() => {
@@ -137,7 +153,10 @@ export default function HistoricalPriceChart({
       bid1.push(r.bidPrice1);
       bid2.push(r.bidPrice2);
       bid3.push(r.bidPrice3);
-      mid.push(r.midPrice);
+      // Skip mid when only one side of the book is present — the parser-
+      // synthesized mid in that case is unreliable and produces visual spikes.
+      const oneSided = r.bidPrice1 === null || r.askPrice1 === null;
+      mid.push(oneSided ? null : r.midPrice);
       ask1.push(r.askPrice1);
       ask2.push(r.askPrice2);
       ask3.push(r.askPrice3);
@@ -151,11 +170,18 @@ export default function HistoricalPriceChart({
   const tradeMarks = useMemo<TradeMark[]>(() => {
     const midByTs = new Map<number, number>();
     for (const r of rows) {
-      if (r.midPrice !== null) midByTs.set(r.timestamp, r.midPrice);
+      // Only use mid when both sides of the book are present.
+      if (r.midPrice !== null && r.bidPrice1 !== null && r.askPrice1 !== null) {
+        midByTs.set(r.timestamp, r.midPrice);
+      }
     }
+    const qMin = qtyFilter?.min ?? 0;
+    const qMax = qtyFilter?.max ?? Infinity;
     const out: TradeMark[] = [];
     for (const t of trades) {
       if (t.symbol !== product) continue;
+      const aq = Math.abs(t.quantity);
+      if (aq < qMin || aq > qMax) continue;
       const m = midByTs.get(t.timestamp);
       let side: TradeMark["side"] = "neutral";
       if (m !== undefined) {
@@ -166,7 +192,7 @@ export default function HistoricalPriceChart({
     }
     out.sort((a, b) => a.ts - b.ts);
     return out;
-  }, [trades, rows, product]);
+  }, [trades, rows, product, qtyFilter?.min, qtyFilter?.max]);
 
   // Per-ts index for tooltip lookups (multiple trades may share a ts).
   const tradesByTs = useMemo(() => {
@@ -179,10 +205,31 @@ export default function HistoricalPriceChart({
     return m;
   }, [tradeMarks]);
 
+  // Volume lookup keyed by ts, indexed by series-index (1..7 matching SERIES order:
+  // 1=bid1 2=bid2 3=bid3 4=mid (no volume) 5=ask1 6=ask2 7=ask3).
+  const volsByTs = useMemo(() => {
+    const m = new Map<number, (number | null)[]>();
+    for (const r of rows) {
+      m.set(r.timestamp, [
+        null,
+        r.bidVolume1,
+        r.bidVolume2,
+        r.bidVolume3,
+        null,
+        r.askVolume1,
+        r.askVolume2,
+        r.askVolume3,
+      ]);
+    }
+    return m;
+  }, [rows]);
+
   const tradeMarksRef = useRef<TradeMark[]>(tradeMarks);
   tradeMarksRef.current = tradeMarks;
   const tradesByTsRef = useRef(tradesByTs);
   tradesByTsRef.current = tradesByTs;
+  const volsByTsRef = useRef(volsByTs);
+  volsByTsRef.current = volsByTs;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -254,29 +301,52 @@ export default function HistoricalPriceChart({
         // Order matters: book lines drawn first by uPlot; our hooks run after.
         // Trades sit on top of book lines, day boundaries on top of trades.
         draw: [drawTrades, drawXPlotLines],
+        setScale: [
+          (u, key) => {
+            if (key !== "x") return;
+            const cb = onXRangeChangeRef.current;
+            if (!cb) return;
+            const min = u.scales.x.min;
+            const max = u.scales.x.max;
+            if (min === undefined || max === undefined || min === null || max === null) {
+              cb(null);
+              return;
+            }
+            cb({ min, max });
+          },
+        ],
         setCursor: [
           (u) => {
+            // When frozen, ignore all cursor updates (including synced ones)
+            // so the tooltip stays pinned where the user froze it.
+            if (frozenRef.current) return;
             const tt = tooltipRef.current;
             const container = containerRef.current;
             if (!tt || !container) return;
             const { idx } = u.cursor;
             if (idx === null || idx === undefined) {
               tt.style.display = "none";
+              if (onHoverTimeRef.current) onHoverTimeRef.current(null);
               return;
             }
             const xVal = u.data[0][idx];
             if (xVal === null || xVal === undefined) {
               tt.style.display = "none";
+              if (onHoverTimeRef.current) onHoverTimeRef.current(null);
               return;
             }
+            if (onHoverTimeRef.current) onHoverTimeRef.current(xVal as number);
+            const vols = volsByTsRef.current.get(xVal as number);
             const lines: string[] = [
               `<div style="font-size:10px;color:#737373">ts ${xVal}</div>`,
             ];
             for (let s = 1; s <= 7; s++) {
               const v = u.data[s]?.[idx];
               if (v === null || v === undefined) continue;
+              const vol = vols?.[s];
+              const suffix = vol !== null && vol !== undefined ? ` × ${vol}` : "";
               lines.push(
-                `<div style="font-size:11px;color:${SERIES_COLORS[s]};font-family:ui-monospace,monospace">${SERIES_LABELS[s]}: ${v}</div>`
+                `<div style="font-size:11px;color:${SERIES_COLORS[s]};font-family:ui-monospace,monospace">${SERIES_LABELS[s]}: ${v}${suffix}</div>`
               );
             }
             const tradesHere = tradesByTsRef.current.get(xVal as number);
@@ -300,12 +370,16 @@ export default function HistoricalPriceChart({
             const tooltipWidth = 180;
             const cursorLeft = u.cursor.left ?? 0;
             const cursorTop = u.cursor.top ?? 0;
-            let left = cursorLeft + 12;
+            const OFFSET = 24;
+            const onLeftHalf = cursorLeft < containerRect.width / 2;
+            let left = onLeftHalf ? cursorLeft + OFFSET : cursorLeft - tooltipWidth - OFFSET;
             if (left + tooltipWidth > containerRect.width) {
-              left = cursorLeft - tooltipWidth - 12;
+              left = containerRect.width - tooltipWidth - 4;
             }
+            if (left < 4) left = 4;
+            const topPx = Math.max(4, Math.min(containerRect.height - 100, cursorTop - 80));
             tt.style.left = `${left}px`;
-            tt.style.top = `${Math.max(4, cursorTop - 30)}px`;
+            tt.style.top = `${topPx}px`;
           },
         ],
       },
@@ -323,14 +397,43 @@ export default function HistoricalPriceChart({
     resizeObserver.observe(containerRef.current);
 
     const localContainer = containerRef.current;
-    const leaveHandler = () => {
-      if (tooltipRef.current) tooltipRef.current.style.display = "none";
+    let pointerInside = false;
+    const enterHandler = () => {
+      pointerInside = true;
     };
+    const leaveHandler = () => {
+      pointerInside = false;
+      if (frozenRef.current) return;
+      if (tooltipRef.current) tooltipRef.current.style.display = "none";
+      if (onHoverTimeRef.current) onHoverTimeRef.current(null);
+    };
+    const keyHandler = (e: KeyboardEvent) => {
+      if (!pointerInside) return;
+      // Don't hijack F when the user is typing in a form control.
+      const target = e.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable) {
+          return;
+        }
+      }
+      if (e.key === "f" || e.key === "F") {
+        e.preventDefault();
+        setFrozen((v) => !v);
+      } else if (e.key === "Escape" && frozenRef.current) {
+        e.preventDefault();
+        setFrozen(false);
+      }
+    };
+    localContainer.addEventListener("mouseenter", enterHandler);
     localContainer.addEventListener("mouseleave", leaveHandler);
+    window.addEventListener("keydown", keyHandler);
 
     return () => {
       resizeObserver.disconnect();
+      localContainer.removeEventListener("mouseenter", enterHandler);
       localContainer.removeEventListener("mouseleave", leaveHandler);
+      window.removeEventListener("keydown", keyHandler);
       unregisterScaleSync(plot);
       plot.destroy();
       plotRef.current = null;
@@ -364,13 +467,33 @@ export default function HistoricalPriceChart({
   return (
     <div className="border border-neutral-600 bg-[#2a2d31] relative min-w-0 overflow-hidden">
       <div className="flex items-center justify-between border-b border-neutral-600 px-3 py-1.5">
-        <span className="text-neutral-100 text-xs font-semibold">{label}</span>
-        <button
-          onClick={() => resetUPlotX(plotRef.current)}
-          className="text-[11px] text-neutral-400 hover:text-neutral-100 border border-neutral-600 px-1.5 py-0.5"
-        >
-          Reset
-        </button>
+        <div className="flex items-center gap-2">
+          <span className="text-neutral-100 text-xs font-semibold">{label}</span>
+          {frozen && (
+            <span className="text-[10px] font-mono uppercase tracking-wider px-1.5 py-0.5 border border-amber-500/60 text-amber-400 bg-amber-950/30">
+              frozen
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => setFrozen((v) => !v)}
+            title="Press F while hovering the chart to toggle freeze"
+            className={`text-[11px] border px-1.5 py-0.5 transition-colors ${
+              frozen
+                ? "border-amber-500/60 bg-amber-950/40 text-amber-300 hover:text-amber-100"
+                : "border-neutral-600 text-neutral-400 hover:text-neutral-100"
+            }`}
+          >
+            {frozen ? "Unfreeze (F)" : "Freeze (F)"}
+          </button>
+          <button
+            onClick={() => resetUPlotX(plotRef.current)}
+            className="text-[11px] text-neutral-400 hover:text-neutral-100 border border-neutral-600 px-1.5 py-0.5"
+          >
+            Reset
+          </button>
+        </div>
       </div>
       <div
         ref={containerRef}

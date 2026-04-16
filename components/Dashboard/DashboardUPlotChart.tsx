@@ -414,6 +414,27 @@ export default function DashboardUPlotChart({
 
   const book = useMemo(() => dedupeRows(rows), [rows]);
 
+  // Volumes lookup for tooltip, keyed by series index used in tooltip rendering:
+  // 1=bid1 2=bid2 3=bid3 4=ask1 5=ask2 6=ask3 (mid has no volume at idx 7).
+  const volsByTs = useMemo(() => {
+    const m = new Map<number, (number | null)[]>();
+    for (const r of rows) {
+      m.set(r.timestamp, [
+        null,
+        r.bidVolume1,
+        r.bidVolume2,
+        r.bidVolume3,
+        r.askVolume1,
+        r.askVolume2,
+        r.askVolume3,
+        null,
+      ]);
+    }
+    return m;
+  }, [rows]);
+  const volsByTsRef = useRef(volsByTs);
+  volsByTsRef.current = volsByTs;
+
   const normalizerSeries = useMemo<(number | null)[]>(() => {
     if (normalizer === "wallMid") return computeWallMidSeries(rows);
     return new Array(book.xs.length).fill(null);
@@ -779,6 +800,7 @@ export default function DashboardUPlotChart({
             const normAtTs = normActiveTt
               ? normalizerLookupRef.current.get(xVal as number)
               : null;
+            const volsAtTs = volsByTsRef.current.get(xVal as number);
 
             for (const l of levelOrder) {
               if (!visL[l.key]) continue;
@@ -791,8 +813,13 @@ export default function DashboardUPlotChart({
               } else {
                 valueHtml = `${v}`;
               }
+              const vol = volsAtTs?.[l.seriesIdx];
+              const volSuffix =
+                vol !== null && vol !== undefined
+                  ? ` <span style="color:#737373">\u00d7 ${vol}</span>`
+                  : "";
               levelRows.push(
-                `<div style="display:flex;align-items:center;gap:6px;font-size:11px;font-family:ui-monospace,monospace;color:#f5f5f5"><span style="display:inline-block;width:8px;height:8px;background:${l.color};flex:none"></span><span style="color:#a3a3a3;min-width:34px">${l.label}</span><span>${valueHtml}</span></div>`
+                `<div style="display:flex;align-items:center;gap:6px;font-size:11px;font-family:ui-monospace,monospace;color:#f5f5f5"><span style="display:inline-block;width:8px;height:8px;background:${l.color};flex:none"></span><span style="color:#a3a3a3;min-width:34px">${l.label}</span><span>${valueHtml}${volSuffix}</span></div>`
               );
             }
 
@@ -938,12 +965,16 @@ export default function DashboardUPlotChart({
 
             const containerRect = container.getBoundingClientRect();
             const tooltipWidth = 160;
-            let leftPx = left + 16;
+            const OFFSET = 24;
+            const onLeftHalf = left < containerRect.width / 2;
+            let leftPx = onLeftHalf ? left + OFFSET : left - tooltipWidth - OFFSET;
             if (leftPx + tooltipWidth > containerRect.width) {
-              leftPx = left - tooltipWidth - 16;
+              leftPx = containerRect.width - tooltipWidth - 4;
             }
+            if (leftPx < 4) leftPx = 4;
+            const topPx = Math.max(4, Math.min(containerRect.height - 100, top - 80));
             tt.style.left = `${leftPx}px`;
-            tt.style.top = `${Math.max(4, top - 40)}px`;
+            tt.style.top = `${topPx}px`;
           },
         ],
       },

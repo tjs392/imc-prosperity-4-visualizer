@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import type { FeatureSet, ProductFeatures, SimMode } from "@/lib/simulation/extractFeatures";
+import type { ActivityRow, Trade } from "@/lib/types";
+import { OrderDepthTable, TradeTable } from "@/components/Logs/tables";
 
 type LoadedInfo = { day: number; rows: number; trades: number };
 
@@ -25,11 +27,39 @@ type Props = {
   round: number | null;
   onClose: () => void;
   onGenerated?: (day: number) => void;
+  activities?: ActivityRow[];
+  trades?: Trade[];
+  allTrades?: Trade[];
+  hoveredTime?: number | null;
+  selectedProduct?: string | null;
+  qtyMin?: number;
+  qtyMax?: number | null;
+  maxTradeQty?: number;
+  onQtyMinChange?: (n: number) => void;
+  onQtyMaxChange?: (n: number | null) => void;
+  zoomRange?: { min: number; max: number } | null;
 };
 
-export default function HistoricalRightPanel({ round, onClose, onGenerated }: Props) {
+export default function HistoricalRightPanel({
+  round,
+  onClose,
+  onGenerated,
+  activities = [],
+  trades = [],
+  allTrades = [],
+  hoveredTime = null,
+  selectedProduct = null,
+  qtyMin = 0,
+  qtyMax = null,
+  maxTradeQty = 0,
+  onQtyMinChange,
+  onQtyMaxChange,
+  zoomRange = null,
+}: Props) {
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({
-    features: true,
+    tables: true,
+    buckets: false,
+    features: false,
     generator: false,
   });
 
@@ -53,6 +83,39 @@ export default function HistoricalRightPanel({ round, onClose, onGenerated }: Pr
 
       <div>
         <PanelSection
+          id="tables"
+          title="Tables"
+          open={openSections.tables}
+          onToggle={() => toggle("tables")}
+        >
+          <TablesSection
+            activities={activities}
+            trades={trades}
+            allTrades={allTrades}
+            hoveredTime={hoveredTime}
+            selectedProduct={selectedProduct}
+            qtyMin={qtyMin}
+            qtyMax={qtyMax}
+            maxTradeQty={maxTradeQty}
+            onQtyMinChange={onQtyMinChange}
+            onQtyMaxChange={onQtyMaxChange}
+            zoomRange={zoomRange}
+          />
+        </PanelSection>
+        <PanelSection
+          id="buckets"
+          title="Price Bucket Analysis"
+          open={openSections.buckets}
+          onToggle={() => toggle("buckets")}
+        >
+          <PriceBucketSection
+            activities={activities}
+            trades={trades}
+            selectedProduct={selectedProduct}
+            zoomRange={zoomRange}
+          />
+        </PanelSection>
+        <PanelSection
           id="features"
           title="Feature Extraction"
           open={openSections.features}
@@ -68,6 +131,778 @@ export default function HistoricalRightPanel({ round, onClose, onGenerated }: Pr
         >
           <GeneratorSection round={round} onGenerated={onGenerated} />
         </PanelSection>
+      </div>
+    </div>
+  );
+}
+
+function TablesSection({
+  activities,
+  trades,
+  allTrades,
+  hoveredTime,
+  selectedProduct,
+  qtyMin,
+  qtyMax,
+  maxTradeQty,
+  onQtyMinChange,
+  onQtyMaxChange,
+  zoomRange,
+}: {
+  activities: ActivityRow[];
+  trades: Trade[];
+  allTrades: Trade[];
+  hoveredTime: number | null;
+  selectedProduct: string | null;
+  qtyMin: number;
+  qtyMax: number | null;
+  maxTradeQty: number;
+  onQtyMinChange?: (n: number) => void;
+  onQtyMaxChange?: (n: number | null) => void;
+  zoomRange: { min: number; max: number } | null;
+}) {
+  const productOptions = Array.from(
+    new Set(activities.map((r) => r.product))
+  ).sort();
+  const [localProduct, setLocalProduct] = useState<string | null>(null);
+  const [tradeWindow, setTradeWindow] = useState<number>(30);
+  const [tradeHistoryOpen, setTradeHistoryOpen] = useState(false);
+  const [qtyFilterOpen, setQtyFilterOpen] = useState(false);
+  const [orderDepthOpen, setOrderDepthOpen] = useState(false);
+  const effectiveProduct = localProduct ?? selectedProduct ?? productOptions[0] ?? null;
+  const filterProducts = effectiveProduct ? [effectiveProduct] : null;
+
+  // Build mid lookup for the current product, skipping one-sided books so
+  // buy/sell classification isn't polluted by the bogus synthesized mids.
+  const midByTs = (() => {
+    if (!effectiveProduct) return new Map<number, number>();
+    const m = new Map<number, number>();
+    for (const r of activities) {
+      if (r.product !== effectiveProduct) continue;
+      if (r.midPrice === null) continue;
+      if (r.bidPrice1 === null || r.askPrice1 === null) continue;
+      m.set(r.timestamp, r.midPrice);
+    }
+    return m;
+  })();
+
+  // In-range predicate for stats. When user has zoomed, restrict to window.
+  const inRange = (ts: number) => {
+    if (!zoomRange) return true;
+    return ts >= zoomRange.min && ts <= zoomRange.max;
+  };
+
+  // Per-side stats over the (filter-applied, zoom-scoped) trades.
+  const sideStats = (() => {
+    let buyCount = 0, buyQty = 0;
+    let sellCount = 0, sellQty = 0;
+    let neutralCount = 0, neutralQty = 0;
+    if (effectiveProduct) {
+      for (const t of trades) {
+        if (t.symbol !== effectiveProduct) continue;
+        if (!inRange(t.timestamp)) continue;
+        const mid = midByTs.get(t.timestamp);
+        const qty = Math.abs(t.quantity);
+        if (mid === undefined) {
+          neutralCount++;
+          neutralQty += qty;
+        } else if (t.price > mid) {
+          buyCount++;
+          buyQty += qty;
+        } else if (t.price < mid) {
+          sellCount++;
+          sellQty += qty;
+        } else {
+          neutralCount++;
+          neutralQty += qty;
+        }
+      }
+    }
+    return {
+      buyCount, buyQty,
+      sellCount, sellQty,
+      neutralCount, neutralQty,
+      avgBuy: buyCount === 0 ? null : buyQty / buyCount,
+      avgSell: sellCount === 0 ? null : sellQty / sellCount,
+    };
+  })();
+
+  const totalFills = sideStats.buyCount + sideStats.sellCount + sideStats.neutralCount;
+
+  // Book-side stats: avg spread, avg/total volume on bid/ask side, zoom-scoped.
+  const bookStats = (() => {
+    let spreadSum = 0, spreadCount = 0;
+    let bidVolSum = 0, bidVolCount = 0;
+    let askVolSum = 0, askVolCount = 0;
+    if (effectiveProduct) {
+      for (const r of activities) {
+        if (r.product !== effectiveProduct) continue;
+        if (!inRange(r.timestamp)) continue;
+        if (r.bidPrice1 !== null && r.askPrice1 !== null) {
+          spreadSum += r.askPrice1 - r.bidPrice1;
+          spreadCount++;
+        }
+        const bv =
+          (r.bidVolume1 ?? 0) + (r.bidVolume2 ?? 0) + (r.bidVolume3 ?? 0);
+        const av =
+          (r.askVolume1 ?? 0) + (r.askVolume2 ?? 0) + (r.askVolume3 ?? 0);
+        if (bv > 0) { bidVolSum += bv; bidVolCount++; }
+        if (av > 0) { askVolSum += av; askVolCount++; }
+      }
+    }
+    return {
+      avgSpread: spreadCount === 0 ? null : spreadSum / spreadCount,
+      avgBidVol: bidVolCount === 0 ? null : bidVolSum / bidVolCount,
+      avgAskVol: askVolCount === 0 ? null : askVolSum / askVolCount,
+      totalBidVol: bidVolSum,
+      totalAskVol: askVolSum,
+      snapshots: Math.max(bidVolCount, askVolCount),
+    };
+  })();
+
+  const effectiveMax = maxTradeQty > 0 ? maxTradeQty : 100;
+  const maxForSlider = qtyMax === null ? effectiveMax : qtyMax;
+
+  const handleSliderMin = (v: number) => {
+    if (!onQtyMinChange) return;
+    const clamped = Math.max(0, Math.min(v, effectiveMax));
+    if (qtyMax !== null && clamped > qtyMax) {
+      onQtyMinChange(qtyMax);
+    } else {
+      onQtyMinChange(clamped);
+    }
+  };
+
+  const handleSliderMax = (v: number) => {
+    if (!onQtyMaxChange) return;
+    const clamped = Math.max(0, Math.min(v, effectiveMax));
+    if (clamped < qtyMin) {
+      onQtyMaxChange(qtyMin);
+    } else if (clamped >= effectiveMax) {
+      onQtyMaxChange(null);
+    } else {
+      onQtyMaxChange(clamped);
+    }
+  };
+
+  if (activities.length === 0 && trades.length === 0) {
+    return (
+      <div className="text-[11px] text-neutral-500 leading-relaxed">
+        Load a day to see order-depth and trade tables here. Hover the price
+        chart to pin the depth view to that timestamp.
+      </div>
+    );
+  }
+
+  const qtyActive = qtyMin > 0 || qtyMax !== null;
+
+  return (
+    <div className="flex flex-col gap-2.5">
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] uppercase tracking-wider text-neutral-500 w-14 flex-none">
+          Product
+        </span>
+        <select
+          value={effectiveProduct ?? ""}
+          onChange={(e) => setLocalProduct(e.target.value || null)}
+          className="flex-1 min-w-0 border border-neutral-600 bg-[#1f2125] text-neutral-200 px-2 py-1 text-[11px] focus:border-neutral-300 focus:outline-none"
+        >
+          {productOptions.length === 0 ? (
+            <option>-</option>
+          ) : (
+            productOptions.map((p) => (
+              <option key={p} value={p} className="bg-[#1f2125]">
+                {p}
+              </option>
+            ))
+          )}
+        </select>
+      </div>
+
+      <div className="text-[10px] text-neutral-500 font-mono flex items-center justify-between gap-2">
+        <span>
+          {hoveredTime === null ? (
+            <span className="text-neutral-600">hover chart to pin timestamp</span>
+          ) : (
+            <>hovering ts <span className="text-neutral-300">{hoveredTime}</span></>
+          )}
+        </span>
+        <span className="text-right">
+          {zoomRange ? (
+            <>
+              <span className="text-amber-400">zoom</span>{" "}
+              <span className="text-neutral-400">{Math.round(zoomRange.min).toLocaleString()} – {Math.round(zoomRange.max).toLocaleString()}</span>
+            </>
+          ) : (
+            <span className="text-neutral-600">full range</span>
+          )}
+        </span>
+      </div>
+
+      {/* Trade + Book stats side by side */}
+      <div className="bg-[#2a2d31] border border-neutral-700/60">
+        <div className="flex items-center justify-between px-2 py-1 border-b border-neutral-700/60 bg-[#2e3137]">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400">
+            Market Stats
+          </span>
+          {(qtyActive || zoomRange) && (
+            <span className="text-[9px] text-amber-400 font-mono">
+              {[qtyActive && "filtered", zoomRange && "zoomed"].filter(Boolean).join(" + ")}
+            </span>
+          )}
+        </div>
+        <div className="grid grid-cols-2 divide-x divide-neutral-700/60">
+          {/* Left: Trade fills */}
+          <div className="px-2 py-2">
+            <div className="text-[9px] uppercase tracking-wider text-neutral-500 mb-1.5">
+              Fills
+            </div>
+            <table className="w-full text-[11px] font-mono">
+              <thead>
+                <tr className="text-[9px] uppercase tracking-wider">
+                  <th className="text-left font-medium pb-1"></th>
+                  <th className="text-right font-medium pb-1 px-0.5" style={{ color: "#4ade80" }}>Buy</th>
+                  <th className="text-right font-medium pb-1 px-0.5" style={{ color: "#f87171" }}>Sell</th>
+                </tr>
+              </thead>
+              <tbody className="text-neutral-200">
+                <tr className="border-t border-neutral-700/40">
+                  <td className="py-0.5 text-neutral-500 text-[10px]">Count</td>
+                  <td className="py-0.5 text-right px-0.5">{sideStats.buyCount.toLocaleString()}</td>
+                  <td className="py-0.5 text-right px-0.5">{sideStats.sellCount.toLocaleString()}</td>
+                </tr>
+                <tr className="border-t border-neutral-700/40">
+                  <td className="py-0.5 text-neutral-500 text-[10px]">Vol</td>
+                  <td className="py-0.5 text-right px-0.5">{sideStats.buyQty.toLocaleString()}</td>
+                  <td className="py-0.5 text-right px-0.5">{sideStats.sellQty.toLocaleString()}</td>
+                </tr>
+                <tr className="border-t border-neutral-700/40">
+                  <td className="py-0.5 text-neutral-500 text-[10px]">Avg</td>
+                  <td className="py-0.5 text-right px-0.5">
+                    {sideStats.avgBuy === null ? <span className="text-neutral-600">-</span> : sideStats.avgBuy.toFixed(1)}
+                  </td>
+                  <td className="py-0.5 text-right px-0.5">
+                    {sideStats.avgSell === null ? <span className="text-neutral-600">-</span> : sideStats.avgSell.toFixed(1)}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <div className="text-[9px] text-neutral-600 font-mono mt-1">
+              {totalFills.toLocaleString()} total
+            </div>
+          </div>
+
+          {/* Right: Book / order stats */}
+          <div className="px-2 py-2">
+            <div className="text-[9px] uppercase tracking-wider text-neutral-500 mb-1.5">
+              Book
+            </div>
+            <table className="w-full text-[11px] font-mono">
+              <thead>
+                <tr className="text-[9px] uppercase tracking-wider">
+                  <th className="text-left font-medium pb-1"></th>
+                  <th className="text-right font-medium pb-1 px-0.5" style={{ color: "#60a5fa" }}>Bid</th>
+                  <th className="text-right font-medium pb-1 px-0.5" style={{ color: "#f87171" }}>Ask</th>
+                </tr>
+              </thead>
+              <tbody className="text-neutral-200">
+                <tr className="border-t border-neutral-700/40">
+                  <td className="py-0.5 text-neutral-500 text-[10px]">Avg vol</td>
+                  <td className="py-0.5 text-right px-0.5">
+                    {bookStats.avgBidVol === null ? <span className="text-neutral-600">-</span> : bookStats.avgBidVol.toFixed(1)}
+                  </td>
+                  <td className="py-0.5 text-right px-0.5">
+                    {bookStats.avgAskVol === null ? <span className="text-neutral-600">-</span> : bookStats.avgAskVol.toFixed(1)}
+                  </td>
+                </tr>
+                <tr className="border-t border-neutral-700/40">
+                  <td className="py-0.5 text-neutral-500 text-[10px]">Tot vol</td>
+                  <td className="py-0.5 text-right px-0.5">{bookStats.totalBidVol.toLocaleString()}</td>
+                  <td className="py-0.5 text-right px-0.5">{bookStats.totalAskVol.toLocaleString()}</td>
+                </tr>
+              </tbody>
+            </table>
+            <div className="flex items-baseline justify-between mt-1.5 pt-1 border-t border-neutral-700/40">
+              <span className="text-[10px] text-neutral-500">Avg spread</span>
+              <span className="text-[11px] text-neutral-200 font-mono">
+                {bookStats.avgSpread === null ? <span className="text-neutral-600">-</span> : bookStats.avgSpread.toFixed(2)}
+              </span>
+            </div>
+            <div className="text-[9px] text-neutral-600 font-mono mt-1">
+              {bookStats.snapshots.toLocaleString()} snapshots
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Trade history — collapsible */}
+      <div className="bg-[#2a2d31] border border-neutral-700/60">
+        <button
+          onClick={() => setTradeHistoryOpen((v) => !v)}
+          className="w-full flex items-center justify-between px-2 py-1.5 hover:bg-[#2e3137] transition-colors"
+        >
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400">
+            Trade History
+          </span>
+          <span className="text-neutral-500 text-[10px]">{tradeHistoryOpen ? "▾" : "▸"}</span>
+        </button>
+        {tradeHistoryOpen && (
+          <div className="px-2 pb-2 flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10px] text-neutral-500">
+                Window
+              </span>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="number"
+                  value={tradeWindow}
+                  min={1}
+                  max={500}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    if (!Number.isFinite(v)) return;
+                    setTradeWindow(Math.max(1, Math.min(500, Math.floor(v))));
+                  }}
+                  className="w-16 border border-neutral-600 bg-[#1f2125] text-neutral-200 px-1.5 py-0.5 text-[11px] font-mono text-right focus:border-neutral-300 focus:outline-none"
+                />
+                <span className="text-[10px] text-neutral-500">trades</span>
+              </div>
+            </div>
+            <TradeTable
+              trades={trades}
+              timestamp={hoveredTime}
+              filterProducts={filterProducts}
+              windowSize={tradeWindow}
+              classifyBySide
+              activities={activities}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Quantity filter — collapsible */}
+      <div className="bg-[#2a2d31] border border-neutral-700/60">
+        <button
+          onClick={() => setQtyFilterOpen((v) => !v)}
+          className="w-full flex items-center justify-between px-2 py-1.5 hover:bg-[#2e3137] transition-colors"
+        >
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400 flex items-center gap-1.5">
+            Quantity Filter
+            {qtyActive && <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />}
+          </span>
+          <span className="text-neutral-500 text-[10px]">{qtyFilterOpen ? "▾" : "▸"}</span>
+        </button>
+        {qtyFilterOpen && (
+          <div className="px-2 pb-2">
+            <div className="flex items-center justify-between mb-1.5">
+              {qtyActive && onQtyMinChange && onQtyMaxChange && (
+                <button
+                  onClick={() => {
+                    onQtyMinChange(0);
+                    onQtyMaxChange(null);
+                  }}
+                  className="text-[9px] text-neutral-500 hover:text-neutral-200 underline"
+                >
+                  reset
+                </button>
+              )}
+            </div>
+            <div className="flex items-center gap-2 mb-2">
+              <input
+                type="number"
+                value={qtyMin}
+                min={0}
+                max={effectiveMax}
+                onChange={(e) => {
+                  const v = e.target.value === "" ? 0 : Number(e.target.value);
+                  handleSliderMin(Number.isFinite(v) ? v : 0);
+                }}
+                className="flex-1 min-w-0 border border-neutral-600 bg-[#1f2125] text-neutral-200 px-2 py-1 text-[11px] focus:border-neutral-300 focus:outline-none"
+                placeholder="min"
+              />
+              <span className="text-neutral-500 text-[10px]">to</span>
+              <input
+                type="number"
+                value={qtyMax === null ? "" : qtyMax}
+                min={0}
+                max={effectiveMax}
+                onChange={(e) => {
+                  if (e.target.value === "") {
+                    onQtyMaxChange?.(null);
+                    return;
+                  }
+                  const v = Number(e.target.value);
+                  handleSliderMax(Number.isFinite(v) ? v : effectiveMax);
+                }}
+                className="flex-1 min-w-0 border border-neutral-600 bg-[#1f2125] text-neutral-200 px-2 py-1 text-[11px] focus:border-neutral-300 focus:outline-none"
+                placeholder="max"
+              />
+            </div>
+            <div className="relative h-5">
+              <div className="absolute left-0 right-0 top-1/2 -translate-y-1/2 h-[2px] bg-neutral-700" />
+              <div
+                className="absolute top-1/2 -translate-y-1/2 h-[2px] bg-neutral-300"
+                style={{
+                  left: `${(qtyMin / effectiveMax) * 100}%`,
+                  right: `${100 - (maxForSlider / effectiveMax) * 100}%`,
+                }}
+              />
+              <input
+                type="range"
+                min={0}
+                max={effectiveMax}
+                value={qtyMin}
+                onChange={(e) => handleSliderMin(Number(e.target.value))}
+                className="qty-slider-thumb absolute inset-0 w-full appearance-none bg-transparent pointer-events-none"
+                style={{ zIndex: qtyMin > effectiveMax - 1 ? 5 : 3 }}
+              />
+              <input
+                type="range"
+                min={0}
+                max={effectiveMax}
+                value={maxForSlider}
+                onChange={(e) => handleSliderMax(Number(e.target.value))}
+                className="qty-slider-thumb absolute inset-0 w-full appearance-none bg-transparent pointer-events-none"
+                style={{ zIndex: 4 }}
+              />
+            </div>
+            <div className="flex justify-between text-neutral-600 text-[9px] mt-0.5">
+              <span>0</span>
+              <span>{effectiveMax}</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Order Depth — collapsible */}
+      <div className="bg-[#2a2d31] border border-neutral-700/60">
+        <button
+          onClick={() => setOrderDepthOpen((v) => !v)}
+          className="w-full flex items-center justify-between px-2 py-1.5 hover:bg-[#2e3137] transition-colors"
+        >
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400">
+            Order Depth
+          </span>
+          <span className="text-neutral-500 text-[10px]">{orderDepthOpen ? "▾" : "▸"}</span>
+        </button>
+        {orderDepthOpen && (
+          <div className="px-2 pb-2">
+            <OrderDepthTable
+              activities={activities}
+              timestamp={hoveredTime}
+              product={effectiveProduct}
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+type BucketRow = {
+  label: string;
+  lo: number;
+  hi: number;
+  buyCount: number;
+  sellCount: number;
+  buyVol: number;
+  sellVol: number;
+};
+
+function PriceBucketSection({
+  activities,
+  trades,
+  selectedProduct,
+  zoomRange,
+}: {
+  activities: ActivityRow[];
+  trades: Trade[];
+  selectedProduct: string | null;
+  zoomRange: { min: number; max: number } | null;
+}) {
+  const productOptions = Array.from(new Set(activities.map((r) => r.product))).sort();
+  const [localProduct, setLocalProduct] = useState<string | null>(null);
+  const effectiveProduct = localProduct ?? selectedProduct ?? productOptions[0] ?? null;
+
+  // Auto-detect center from mid mean for selected product.
+  const autoCenter = (() => {
+    if (!effectiveProduct) return 0;
+    let sum = 0, count = 0;
+    for (const r of activities) {
+      if (r.product !== effectiveProduct) continue;
+      if (r.midPrice === null || r.bidPrice1 === null || r.askPrice1 === null) continue;
+      if (zoomRange && (r.timestamp < zoomRange.min || r.timestamp > zoomRange.max)) continue;
+      sum += r.midPrice;
+      count++;
+    }
+    return count === 0 ? 0 : Math.round(sum / count);
+  })();
+
+  const [centerOverride, setCenterOverride] = useState<string>("");
+  const center = centerOverride.trim() !== "" && Number.isFinite(Number(centerOverride))
+    ? Number(centerOverride)
+    : autoCenter;
+
+  // Auto bucket width: based on data range. Aim for ~6-8 buckets.
+  const autoWidth = (() => {
+    if (!effectiveProduct) return 5;
+    let lo = Infinity, hi = -Infinity;
+    for (const r of activities) {
+      if (r.product !== effectiveProduct) continue;
+      if (r.midPrice === null || r.bidPrice1 === null || r.askPrice1 === null) continue;
+      if (zoomRange && (r.timestamp < zoomRange.min || r.timestamp > zoomRange.max)) continue;
+      if (r.midPrice < lo) lo = r.midPrice;
+      if (r.midPrice > hi) hi = r.midPrice;
+    }
+    if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi === lo) return 5;
+    const range = hi - lo;
+    // Pick a nice round bucket width that gives 6-8 buckets
+    const raw = range / 7;
+    const candidates = [1, 2, 5, 10, 15, 20, 25, 50, 100, 200, 500];
+    let best = 5;
+    let bestDist = Infinity;
+    for (const c of candidates) {
+      const d = Math.abs(c - raw);
+      if (d < bestDist) { bestDist = d; best = c; }
+    }
+    return best;
+  })();
+
+  const [widthOverride, setWidthOverride] = useState<string>("");
+  const bucketWidth = widthOverride.trim() !== "" && Number.isFinite(Number(widthOverride)) && Number(widthOverride) > 0
+    ? Number(widthOverride)
+    : autoWidth;
+
+  // Build mid lookup (two-sided only)
+  const midByTs = (() => {
+    if (!effectiveProduct) return new Map<number, number>();
+    const m = new Map<number, number>();
+    for (const r of activities) {
+      if (r.product !== effectiveProduct) continue;
+      if (r.midPrice === null || r.bidPrice1 === null || r.askPrice1 === null) continue;
+      m.set(r.timestamp, r.midPrice);
+    }
+    return m;
+  })();
+
+  // Compute buckets
+  const bucketData = (() => {
+    // Generate symmetric bucket boundaries around center
+    // e.g. center=10000, width=5 => [..., 9990-9995, 9995-10000, 10000-10005, 10005-10010, ...]
+    // We'll create enough to cover all trades in range, plus catch-all edges.
+    const inRange = (ts: number) => !zoomRange || (ts >= zoomRange.min && ts <= zoomRange.max);
+
+    // First pass: find price extremes across trades in product + range
+    let lo = Infinity, hi = -Infinity;
+    for (const t of trades) {
+      if (t.symbol !== effectiveProduct) continue;
+      if (!inRange(t.timestamp)) continue;
+      if (t.price < lo) lo = t.price;
+      if (t.price > hi) hi = t.price;
+    }
+    if (!Number.isFinite(lo)) return [];
+
+    // Generate bucket edges from center outward to cover lo..hi
+    const stepsDown = Math.ceil((center - lo) / bucketWidth) + 1;
+    const stepsUp = Math.ceil((hi - center) / bucketWidth) + 1;
+    const edges: number[] = [];
+    for (let i = -stepsDown; i <= stepsUp; i++) {
+      edges.push(center + i * bucketWidth);
+    }
+
+    // Create bucket rows
+    const rows: BucketRow[] = [];
+    for (let i = 0; i < edges.length - 1; i++) {
+      rows.push({
+        label: `${edges[i]}–${edges[i + 1]}`,
+        lo: edges[i],
+        hi: edges[i + 1],
+        buyCount: 0, sellCount: 0,
+        buyVol: 0, sellVol: 0,
+      });
+    }
+
+    // Classify trades into buckets
+    for (const t of trades) {
+      if (t.symbol !== effectiveProduct) continue;
+      if (!inRange(t.timestamp)) continue;
+      const mid = midByTs.get(t.timestamp);
+      const qty = Math.abs(t.quantity);
+      const isBuy = mid !== undefined && t.price > mid;
+      const isSell = mid !== undefined && t.price < mid;
+
+      // Find which bucket this trade's price falls into
+      for (const row of rows) {
+        if (t.price >= row.lo && t.price < row.hi) {
+          if (isBuy) { row.buyCount++; row.buyVol += qty; }
+          else if (isSell) { row.sellCount++; row.sellVol += qty; }
+          else { row.buyCount += 0.5; row.sellCount += 0.5; row.buyVol += qty / 2; row.sellVol += qty / 2; }
+          break;
+        }
+      }
+      // Edge case: price exactly equals last edge — put in last bucket
+      if (t.price === edges[edges.length - 1] && rows.length > 0) {
+        const row = rows[rows.length - 1];
+        if (isBuy) { row.buyCount++; row.buyVol += qty; }
+        else if (isSell) { row.sellCount++; row.sellVol += qty; }
+      }
+    }
+
+    // Filter to non-empty buckets
+    return rows.filter((r) => r.buyCount > 0 || r.sellCount > 0);
+  })();
+
+  // Find the max count for the imbalance bar scaling
+  const maxCount = Math.max(1, ...bucketData.map((r) => Math.max(r.buyCount, r.sellCount)));
+
+  if (activities.length === 0) {
+    return (
+      <div className="text-[11px] text-neutral-500 leading-relaxed">
+        Load data to run price-bucket analysis. Classifies trades into
+        symmetric price bands around a center (auto-detected or manual)
+        to reveal buy/sell asymmetry at different price levels.
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2.5">
+      {/* Controls */}
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] uppercase tracking-wider text-neutral-500 w-14 flex-none">
+          Product
+        </span>
+        <select
+          value={effectiveProduct ?? ""}
+          onChange={(e) => setLocalProduct(e.target.value || null)}
+          className="flex-1 min-w-0 border border-neutral-600 bg-[#1f2125] text-neutral-200 px-2 py-1 text-[11px] focus:border-neutral-300 focus:outline-none"
+        >
+          {productOptions.length === 0 ? (
+            <option>-</option>
+          ) : (
+            productOptions.map((p) => (
+              <option key={p} value={p} className="bg-[#1f2125]">{p}</option>
+            ))
+          )}
+        </select>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <label className="flex flex-col gap-0.5">
+          <span className="text-[9px] uppercase tracking-wider text-neutral-500">
+            Center price
+          </span>
+          <input
+            type="number"
+            value={centerOverride}
+            placeholder={String(autoCenter)}
+            onChange={(e) => setCenterOverride(e.target.value)}
+            className="border border-neutral-600 bg-[#1f2125] text-neutral-200 px-2 py-1 text-[11px] font-mono focus:border-neutral-300 focus:outline-none placeholder-neutral-600"
+          />
+        </label>
+        <label className="flex flex-col gap-0.5">
+          <span className="text-[9px] uppercase tracking-wider text-neutral-500">
+            Bucket width
+          </span>
+          <input
+            type="number"
+            value={widthOverride}
+            placeholder={String(autoWidth)}
+            onChange={(e) => setWidthOverride(e.target.value)}
+            className="border border-neutral-600 bg-[#1f2125] text-neutral-200 px-2 py-1 text-[11px] font-mono focus:border-neutral-300 focus:outline-none placeholder-neutral-600"
+          />
+        </label>
+      </div>
+
+      <div className="text-[9px] text-neutral-600 font-mono">
+        center {center.toLocaleString()} · width {bucketWidth} · {bucketData.length} buckets
+        {zoomRange && <span className="text-amber-400 ml-1">zoom scoped</span>}
+      </div>
+
+      {/* Results table */}
+      {bucketData.length === 0 ? (
+        <div className="text-[11px] text-neutral-500">No trades in range.</div>
+      ) : (
+        <div className="border border-neutral-700 bg-[#2a2d31] overflow-x-auto">
+          <table className="w-full border-collapse text-[10px] font-mono">
+            <thead>
+              <tr className="text-[9px] uppercase tracking-wider text-neutral-500">
+                <th className="text-left font-medium px-1.5 py-1 border-b border-neutral-700">Price range</th>
+                <th className="text-right font-medium px-1.5 py-1 border-b border-neutral-700" style={{ color: "#4ade80" }}>Buys</th>
+                <th className="text-right font-medium px-1.5 py-1 border-b border-neutral-700" style={{ color: "#f87171" }}>Sells</th>
+                <th className="text-right font-medium px-1.5 py-1 border-b border-neutral-700" style={{ color: "#4ade80" }}>B vol</th>
+                <th className="text-right font-medium px-1.5 py-1 border-b border-neutral-700" style={{ color: "#f87171" }}>S vol</th>
+                <th className="text-center font-medium px-1.5 py-1 border-b border-neutral-700">Imbalance</th>
+              </tr>
+            </thead>
+            <tbody className="text-neutral-200">
+              {bucketData.map((row, i) => {
+                const total = row.buyCount + row.sellCount;
+                const imbalance = total === 0 ? 0 : (row.buyCount - row.sellCount) / total;
+                const isCenterBucket = center >= row.lo && center < row.hi;
+                const avgBuy = row.buyCount === 0 ? null : row.buyVol / row.buyCount;
+                const avgSell = row.sellCount === 0 ? null : row.sellVol / row.sellCount;
+                const buyPct = maxCount === 0 ? 0 : (row.buyCount / maxCount) * 100;
+                const sellPct = maxCount === 0 ? 0 : (row.sellCount / maxCount) * 100;
+                return (
+                  <tr
+                    key={i}
+                    className={`border-t border-neutral-700/40 ${isCenterBucket ? "bg-neutral-700/20" : ""}`}
+                    title={`Avg buy: ${avgBuy?.toFixed(1) ?? "-"} | Avg sell: ${avgSell?.toFixed(1) ?? "-"}`}
+                  >
+                    <td className="px-1.5 py-1 text-neutral-400 whitespace-nowrap">
+                      {row.label}
+                      {isCenterBucket && <span className="text-amber-400 ml-1">◆</span>}
+                    </td>
+                    <td className="px-1.5 py-1 text-right">{Math.round(row.buyCount)}</td>
+                    <td className="px-1.5 py-1 text-right">{Math.round(row.sellCount)}</td>
+                    <td className="px-1.5 py-1 text-right text-neutral-400">{Math.round(row.buyVol).toLocaleString()}</td>
+                    <td className="px-1.5 py-1 text-right text-neutral-400">{Math.round(row.sellVol).toLocaleString()}</td>
+                    <td className="px-1.5 py-1">
+                      <div className="flex items-center gap-0.5 justify-center">
+                        <div className="w-12 h-2.5 bg-neutral-800 relative overflow-hidden flex">
+                          <div
+                            className="absolute right-1/2 top-0 h-full"
+                            style={{
+                              width: `${buyPct / 2}%`,
+                              backgroundColor: "rgba(74,222,128,0.6)",
+                              transform: "translateX(0)",
+                              right: "50%",
+                              left: "auto",
+                            }}
+                          />
+                          <div
+                            className="absolute left-1/2 top-0 h-full"
+                            style={{
+                              width: `${sellPct / 2}%`,
+                              backgroundColor: "rgba(248,113,113,0.6)",
+                            }}
+                          />
+                          <div className="absolute left-1/2 top-0 w-px h-full bg-neutral-600" />
+                        </div>
+                        <span
+                          className="text-[9px] w-8 text-right"
+                          style={{
+                            color: imbalance > 0.05 ? "#4ade80" : imbalance < -0.05 ? "#f87171" : "#737373",
+                          }}
+                        >
+                          {imbalance > 0 ? "+" : ""}{(imbalance * 100).toFixed(0)}%
+                        </span>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="text-[9px] text-neutral-600 leading-snug">
+        Buys = trade price &gt; mid (taker bought). Sells = trade price &lt; mid.
+        Hover a row to see avg fill sizes. Symmetric counts across buckets
+        suggest mechanical mean reversion; asymmetry suggests informed flow.
+        ◆ marks the bucket containing the center price.
       </div>
     </div>
   );
