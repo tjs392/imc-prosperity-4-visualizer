@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { generateDay, activitiesToCSV, tradesToCSV } from "@/lib/simulation/generateSimulation";
 import type { FeatureSet, SimMode } from "@/lib/simulation/extractFeatures";
+import type { ProductModeConfig } from "@/lib/simulation/generateSimulation";
 
 export const runtime = "nodejs";
 
@@ -12,7 +13,8 @@ type ReqBody = {
   durationTimestamps?: number;
   step?: number;
   seed?: number;
-  productModes?: Record<string, { mode: SimMode; smoothing?: number }>;
+  numDays?: number;
+  productModes?: Record<string, ProductModeConfig>;
 };
 
 function nextDayFor(round: number): number {
@@ -105,6 +107,7 @@ export async function POST(req: NextRequest) {
 
   const round = body.round;
   const day = typeof body.day === "number" ? body.day : nextDayFor(round);
+  const numDays = Math.max(1, Math.min(2, body.numDays ?? 1));
 
   const features = loadFeatures(round);
   if (!features) {
@@ -121,32 +124,42 @@ export async function POST(req: NextRequest) {
     step: body.step ?? 100,
     seed: body.seed,
     startDay: day,
+    numDays,
     productModes: body.productModes,
   };
 
-  const { activities, trades } = generateDay(features, params);
+  const result = generateDay(features, params);
 
   const outDir = path.join(process.cwd(), "public", "simulation", `round${round}`, "generated");
   fs.mkdirSync(outDir, { recursive: true });
 
-  const pricesFile = `prices_round_${round}_day_${day}.csv`;
-  const tradesFile = `trades_round_${round}_day_${day}.csv`;
-  const pricesPath = path.join(outDir, pricesFile);
-  const tradesPath = path.join(outDir, tradesFile);
+  const generatedDays: number[] = [];
+  const paths: string[] = [];
 
-  fs.writeFileSync(pricesPath, activitiesToCSV(activities, day));
-  fs.writeFileSync(tradesPath, tradesToCSV(trades));
+  for (const dayData of result.days) {
+    generatedDays.push(dayData.day);
+
+    const pricesFile = `prices_round_${round}_day_${dayData.day}.csv`;
+    const tradesFile = `trades_round_${round}_day_${dayData.day}.csv`;
+    fs.writeFileSync(path.join(outDir, pricesFile), activitiesToCSV(dayData.activities, dayData.day));
+    fs.writeFileSync(path.join(outDir, tradesFile), tradesToCSV(dayData.trades));
+    paths.push(
+      `public/simulation/round${round}/generated/${pricesFile}`,
+      `public/simulation/round${round}/generated/${tradesFile}`
+    );
+  }
 
   return NextResponse.json({
     ok: true,
-    day,
-    pricesPath: `public/simulation/round${round}/generated/${pricesFile}`,
-    tradesPath: `public/simulation/round${round}/generated/${tradesFile}`,
+    days: generatedDays,
+    day: generatedDays[0],
+    paths,
     stats: {
       products: Object.keys(features.products).length,
-      snapshots: Math.floor(params.durationTimestamps / params.step),
-      activityRows: activities.length,
-      trades: trades.length,
+      numDays,
+      snapshotsPerDay: Math.floor(params.durationTimestamps / params.step),
+      activityRows: result.allActivities.length,
+      trades: result.allTrades.length,
     },
   });
 }

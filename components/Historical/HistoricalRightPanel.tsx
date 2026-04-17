@@ -1,27 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FeatureSet, ProductFeatures, SimMode } from "@/lib/simulation/extractFeatures";
 import type { ActivityRow, Trade } from "@/lib/types";
-import { OrderDepthTable, TradeTable } from "@/components/Logs/tables";
+import { OrderDepthTable } from "@/components/Logs/tables";
 
 type LoadedInfo = { day: number; rows: number; trades: number };
 
 const FALLBACK_SMOOTHING = 0.05;
-
-type Overrides = {
-  slopeMultiplier: number;
-  noiseMultiplier: number;
-  levelShift: number;
-  applyAfterTimestamp: number | null;
-};
-
-const DEFAULT_OVERRIDES: Overrides = {
-  slopeMultiplier: 1,
-  noiseMultiplier: 1,
-  levelShift: 0,
-  applyAfterTimestamp: null,
-};
 
 type Props = {
   round: number | null;
@@ -165,8 +151,8 @@ function TablesSection({
     new Set(activities.map((r) => r.product))
   ).sort();
   const [localProduct, setLocalProduct] = useState<string | null>(null);
-  const [tradeWindow, setTradeWindow] = useState<number>(30);
   const [tradeHistoryOpen, setTradeHistoryOpen] = useState(false);
+  const [microOpen, setMicroOpen] = useState(false);
   const [qtyFilterOpen, setQtyFilterOpen] = useState(false);
   const [orderDepthOpen, setOrderDepthOpen] = useState(false);
   const effectiveProduct = localProduct ?? selectedProduct ?? productOptions[0] ?? null;
@@ -435,7 +421,31 @@ function TablesSection({
         </div>
       </div>
 
-      {/* Trade history — collapsible */}
+      {/* Microstructure Analytics — collapsible */}
+      <div className="bg-[#2a2d31] border border-neutral-700/60">
+        <button
+          onClick={() => setMicroOpen((v) => !v)}
+          className="w-full flex items-center justify-between px-2 py-1.5 hover:bg-[#2e3137] transition-colors"
+        >
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400">
+            Microstructure Analytics
+          </span>
+          <span className="text-neutral-500 text-[10px]">{microOpen ? "▾" : "▸"}</span>
+        </button>
+        {microOpen && (
+          <div className="px-2 pb-2">
+            <MicrostructureSection
+              trades={trades}
+              activities={activities}
+              product={effectiveProduct}
+              zoomRange={zoomRange}
+              midByTs={midByTs}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Trade history — collapsible, shows all trades in zoom window */}
       <div className="bg-[#2a2d31] border border-neutral-700/60">
         <button
           onClick={() => setTradeHistoryOpen((v) => !v)}
@@ -447,34 +457,12 @@ function TablesSection({
           <span className="text-neutral-500 text-[10px]">{tradeHistoryOpen ? "▾" : "▸"}</span>
         </button>
         {tradeHistoryOpen && (
-          <div className="px-2 pb-2 flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[10px] text-neutral-500">
-                Window
-              </span>
-              <div className="flex items-center gap-1.5">
-                <input
-                  type="number"
-                  value={tradeWindow}
-                  min={1}
-                  max={500}
-                  onChange={(e) => {
-                    const v = Number(e.target.value);
-                    if (!Number.isFinite(v)) return;
-                    setTradeWindow(Math.max(1, Math.min(500, Math.floor(v))));
-                  }}
-                  className="w-16 border border-neutral-600 bg-[#1f2125] text-neutral-200 px-1.5 py-0.5 text-[11px] font-mono text-right focus:border-neutral-300 focus:outline-none"
-                />
-                <span className="text-[10px] text-neutral-500">trades</span>
-              </div>
-            </div>
-            <TradeTable
+          <div className="px-2 pb-2">
+            <ZoomTradeTable
               trades={trades}
-              timestamp={hoveredTime}
-              filterProducts={filterProducts}
-              windowSize={tradeWindow}
-              classifyBySide
               activities={activities}
+              product={effectiveProduct}
+              zoomRange={zoomRange}
             />
           </div>
         )}
@@ -908,6 +896,557 @@ function PriceBucketSection({
   );
 }
 
+const BID_TINT = "rgba(74,222,128,0.10)";
+const ASK_TINT = "rgba(248,113,113,0.10)";
+
+function MicrostructureSection({
+  trades,
+  activities,
+  product,
+  zoomRange,
+  midByTs,
+}: {
+  trades: Trade[];
+  activities: ActivityRow[];
+  product: string | null;
+  zoomRange: { min: number; max: number } | null;
+  midByTs: Map<number, number>;
+}) {
+  const [nearMissOpen, setNearMissOpen] = useState(false);
+  const [sizeDistOpen, setSizeDistOpen] = useState(false);
+
+  if (!product) {
+    return <div className="text-[11px] text-neutral-500">Select a product.</div>;
+  }
+
+  const inRange = (ts: number) => !zoomRange || (ts >= zoomRange.min && ts <= zoomRange.max);
+
+  // Filter trades to product + zoom
+  const productTrades: Trade[] = [];
+  for (const t of trades) {
+    if (t.symbol !== product) continue;
+    if (!inRange(t.timestamp)) continue;
+    productTrades.push(t);
+  }
+
+  // Filter activities to product + zoom
+  const productRows: ActivityRow[] = [];
+  for (const r of activities) {
+    if (r.product !== product) continue;
+    if (!inRange(r.timestamp)) continue;
+    productRows.push(r);
+  }
+
+  // ────────────────────────────────────────────────
+  // 3. Time between fills
+  // ────────────────────────────────────────────────
+  const interArrivals: number[] = [];
+  for (let i = 1; i < productTrades.length; i++) {
+    interArrivals.push(productTrades[i].timestamp - productTrades[i - 1].timestamp);
+  }
+  const avgInterArrival = interArrivals.length === 0 ? null : interArrivals.reduce((a, b) => a + b, 0) / interArrivals.length;
+  const medianInterArrival = (() => {
+    if (interArrivals.length === 0) return null;
+    const sorted = [...interArrivals].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  })();
+  const timestepSize = productRows.length >= 2
+    ? productRows[1].timestamp - productRows[0].timestamp
+    : 100;
+  const fillsPerTick = productRows.length === 0 ? null : productTrades.length / productRows.length;
+  const ticksPerFill = fillsPerTick && fillsPerTick > 0 ? 1 / fillsPerTick : null;
+
+  // ────────────────────────────────────────────────
+  // 4. Spread captured vs drift missed
+  // ────────────────────────────────────────────────
+  // Avg spread per fill: for each fill, what was the spread at that moment?
+  const spreadByTs = new Map<number, number>();
+  for (const r of productRows) {
+    if (r.bidPrice1 !== null && r.askPrice1 !== null) {
+      spreadByTs.set(r.timestamp, r.askPrice1 - r.bidPrice1);
+    }
+  }
+  let spreadAtFillSum = 0, spreadAtFillCount = 0;
+  for (const t of productTrades) {
+    const s = spreadByTs.get(t.timestamp);
+    if (s !== undefined) { spreadAtFillSum += s; spreadAtFillCount++; }
+  }
+  const avgSpreadPerFill = spreadAtFillCount === 0 ? null : spreadAtFillSum / spreadAtFillCount;
+
+  // Drift per tick: avg |mid[t+1] - mid[t]|
+  let driftSum = 0, driftCount = 0;
+  for (let i = 1; i < productRows.length; i++) {
+    const m0 = midByTs.get(productRows[i - 1].timestamp);
+    const m1 = midByTs.get(productRows[i].timestamp);
+    if (m0 !== undefined && m1 !== undefined) {
+      driftSum += Math.abs(m1 - m0);
+      driftCount++;
+    }
+  }
+  const driftPerTick = driftCount === 0 ? null : driftSum / driftCount;
+  const driftMissed = driftPerTick !== null && ticksPerFill !== null
+    ? driftPerTick * ticksPerFill : null;
+  const mmEdge = avgSpreadPerFill !== null && driftMissed !== null
+    ? avgSpreadPerFill - driftMissed : null;
+
+  // ────────────────────────────────────────────────
+  // 7. Autocorrelation of returns
+  // ────────────────────────────────────────────────
+  const midSeries: number[] = [];
+  for (const r of productRows) {
+    const m = midByTs.get(r.timestamp);
+    if (m !== undefined) midSeries.push(m);
+  }
+  const returns: number[] = [];
+  for (let i = 1; i < midSeries.length; i++) {
+    returns.push(midSeries[i] - midSeries[i - 1]);
+  }
+  const autocorr = (() => {
+    if (returns.length < 3) return null;
+    const mu = returns.reduce((a, b) => a + b, 0) / returns.length;
+    let num = 0, den = 0;
+    for (let i = 0; i < returns.length; i++) {
+      den += (returns[i] - mu) ** 2;
+    }
+    for (let i = 1; i < returns.length; i++) {
+      num += (returns[i] - mu) * (returns[i - 1] - mu);
+    }
+    return den === 0 ? 0 : num / den;
+  })();
+  const autocorrLabel =
+    autocorr === null ? "-"
+    : autocorr > 0.05 ? "momentum"
+    : autocorr < -0.05 ? "mean-reverting"
+    : "neutral";
+  const autocorrColor =
+    autocorr === null ? "#737373"
+    : autocorr > 0.05 ? "#60a5fa"
+    : autocorr < -0.05 ? "#f59e0b"
+    : "#737373";
+
+  // ────────────────────────────────────────────────
+  // 6. Trade size distribution
+  // ────────────────────────────────────────────────
+  const sizeCounts = new Map<number, number>();
+  for (const t of productTrades) {
+    const s = Math.abs(t.quantity);
+    sizeCounts.set(s, (sizeCounts.get(s) ?? 0) + 1);
+  }
+  const sizeEntries = Array.from(sizeCounts.entries()).sort((a, b) => a[0] - b[0]);
+  const maxSizeCount = Math.max(1, ...sizeEntries.map(([, c]) => c));
+
+  // ────────────────────────────────────────────────
+  // 5. Near-miss events: ask came down aggressively but no fill
+  // A "near miss" = a snapshot where ask1 dropped significantly toward
+  // or below the previous mid, yet no trade occurred at that timestamp.
+  // ────────────────────────────────────────────────
+  const tradeTimestamps = new Set<number>();
+  for (const t of productTrades) tradeTimestamps.add(t.timestamp);
+
+  type NearMiss = {
+    ts: number;
+    ask: number;
+    prevMid: number;
+    gap: number;
+    bid: number | null;
+    spread: number | null;
+  };
+  const nearMisses: NearMiss[] = [];
+  let prevMid: number | null = null;
+  for (const r of productRows) {
+    const mid = midByTs.get(r.timestamp) ?? null;
+    if (r.askPrice1 !== null && prevMid !== null && !tradeTimestamps.has(r.timestamp)) {
+      const gap = r.askPrice1 - prevMid;
+      // Near miss: ask came within half the typical spread of previous mid
+      if (avgSpreadPerFill !== null && gap < avgSpreadPerFill * 0.5) {
+        nearMisses.push({
+          ts: r.timestamp,
+          ask: r.askPrice1,
+          prevMid,
+          gap,
+          bid: r.bidPrice1,
+          spread: r.bidPrice1 !== null ? r.askPrice1 - r.bidPrice1 : null,
+        });
+      }
+    }
+    if (mid !== null) prevMid = mid;
+  }
+
+  const fmt = (v: number | null, d = 2) =>
+    v === null ? <span className="text-neutral-600">-</span> : v.toFixed(d);
+
+  return (
+    <div className="flex flex-col gap-2.5">
+      {/* Time between fills */}
+      <div>
+        <div className="text-[9px] uppercase tracking-wider text-neutral-500 mb-1">Time between fills</div>
+        <table className="w-full text-[11px] font-mono">
+          <tbody className="text-neutral-200">
+            <tr className="border-t border-neutral-700/40">
+              <td className="py-0.5 text-neutral-500 text-[10px]">Avg inter-arrival</td>
+              <td className="py-0.5 text-right">{fmt(avgInterArrival, 0)} <span className="text-neutral-600 text-[9px]">ts</span></td>
+            </tr>
+            <tr className="border-t border-neutral-700/40">
+              <td className="py-0.5 text-neutral-500 text-[10px]">Median inter-arrival</td>
+              <td className="py-0.5 text-right">{fmt(medianInterArrival, 0)} <span className="text-neutral-600 text-[9px]">ts</span></td>
+            </tr>
+            <tr className="border-t border-neutral-700/40">
+              <td className="py-0.5 text-neutral-500 text-[10px]">Fills per tick</td>
+              <td className="py-0.5 text-right">{fmt(fillsPerTick, 3)}</td>
+            </tr>
+            <tr className="border-t border-neutral-700/40">
+              <td className="py-0.5 text-neutral-500 text-[10px]">Ticks per fill</td>
+              <td className="py-0.5 text-right">{fmt(ticksPerFill, 1)}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div className="text-[9px] text-neutral-600 mt-1">
+          {productTrades.length.toLocaleString()} fills across {productRows.length.toLocaleString()} ticks (step {timestepSize})
+        </div>
+      </div>
+
+      {/* Spread captured vs drift missed */}
+      <div>
+        <div className="text-[9px] uppercase tracking-wider text-neutral-500 mb-1">MM edge analysis</div>
+        <table className="w-full text-[11px] font-mono">
+          <tbody className="text-neutral-200">
+            <tr className="border-t border-neutral-700/40">
+              <td className="py-0.5 text-neutral-500 text-[10px]">Avg spread at fill</td>
+              <td className="py-0.5 text-right">{fmt(avgSpreadPerFill)}</td>
+            </tr>
+            <tr className="border-t border-neutral-700/40">
+              <td className="py-0.5 text-neutral-500 text-[10px]">Drift per tick</td>
+              <td className="py-0.5 text-right">{fmt(driftPerTick, 3)}</td>
+            </tr>
+            <tr className="border-t border-neutral-700/40">
+              <td className="py-0.5 text-neutral-500 text-[10px]">Drift missed (per fill)</td>
+              <td className="py-0.5 text-right">{fmt(driftMissed)}</td>
+            </tr>
+            <tr className="border-t border-neutral-700/40">
+              <td className="py-0.5 text-neutral-500 text-[10px] font-semibold">MM edge</td>
+              <td className="py-0.5 text-right font-semibold" style={{
+                color: mmEdge === null ? "#737373" : mmEdge > 0 ? "#4ade80" : "#f87171"
+              }}>
+                {mmEdge === null ? <span className="text-neutral-600">-</span> : (mmEdge > 0 ? "+" : "") + mmEdge.toFixed(2)}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div className="text-[9px] text-neutral-600 mt-1 leading-snug">
+          {mmEdge !== null && mmEdge > 0
+            ? "Spread > drift missed → market-making adds value on top of directional."
+            : mmEdge !== null && mmEdge <= 0
+            ? "Drift missed ≥ spread → pure directional may outperform market-making."
+            : ""}
+        </div>
+      </div>
+
+      {/* Autocorrelation */}
+      <div>
+        <div className="text-[9px] uppercase tracking-wider text-neutral-500 mb-1">Return autocorrelation (lag-1)</div>
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="text-[11px] font-mono" style={{ color: autocorrColor }}>
+            {autocorr === null ? "-" : autocorr.toFixed(4)}
+          </span>
+          <span className="text-[10px] font-mono" style={{ color: autocorrColor }}>
+            {autocorrLabel}
+          </span>
+        </div>
+        <div className="text-[9px] text-neutral-600 mt-1 leading-snug">
+          {autocorrLabel === "mean-reverting"
+            ? "Negative → dips tend to reverse. Favor buying dips, selling rips."
+            : autocorrLabel === "momentum"
+            ? "Positive → trends tend to continue. Favor trend-following."
+            : "Near zero → no predictable pattern in consecutive returns."}
+        </div>
+      </div>
+
+      {/* Trade size distribution — collapsible */}
+      <div className="border-t border-neutral-700/40 pt-2">
+        <button
+          onClick={() => setSizeDistOpen((v) => !v)}
+          className="w-full flex items-center justify-between hover:text-neutral-200 transition-colors"
+        >
+          <span className="text-[9px] uppercase tracking-wider text-neutral-500">
+            Trade size distribution ({sizeEntries.length} sizes)
+          </span>
+          <span className="text-neutral-500 text-[10px]">{sizeDistOpen ? "▾" : "▸"}</span>
+        </button>
+        {sizeDistOpen && (
+          <div className="mt-1.5 flex flex-col gap-0.5">
+            {sizeEntries.map(([size, count]) => (
+              <div key={size} className="flex items-center gap-2 text-[10px] font-mono">
+                <span className="w-8 text-right text-neutral-400">{size}</span>
+                <div className="flex-1 h-3 bg-neutral-800 relative">
+                  <div
+                    className="h-full bg-purple-500/60"
+                    style={{ width: `${(count / maxSizeCount) * 100}%` }}
+                  />
+                </div>
+                <span className="w-10 text-right text-neutral-500">{count}</span>
+              </div>
+            ))}
+            <div className="text-[9px] text-neutral-600 mt-1 leading-snug">
+              Look for a single size that dominates at specific price levels —
+              could indicate an informed trader with a fixed lot size.
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Near-miss events — collapsible */}
+      <div className="border-t border-neutral-700/40 pt-2">
+        <button
+          onClick={() => setNearMissOpen((v) => !v)}
+          className="w-full flex items-center justify-between hover:text-neutral-200 transition-colors"
+        >
+          <span className="text-[9px] uppercase tracking-wider text-neutral-500">
+            Near misses ({nearMisses.length})
+          </span>
+          <span className="text-neutral-500 text-[10px]">{nearMissOpen ? "▾" : "▸"}</span>
+        </button>
+        {nearMissOpen && (
+          <div className="mt-1.5">
+            {nearMisses.length === 0 ? (
+              <div className="text-[11px] text-neutral-500">
+                No near misses found (ask never came within half-spread of prev mid without a fill).
+              </div>
+            ) : (
+              <>
+                <div className="overflow-x-auto border border-neutral-700 max-h-[250px] overflow-y-auto">
+                  <table className="w-full border-collapse text-[10px] font-mono whitespace-nowrap">
+                    <thead className="sticky top-0 bg-[#2e3137] z-10">
+                      <tr className="text-[9px] uppercase tracking-wider text-neutral-500">
+                        <th className="text-right font-medium px-1.5 py-1 border-b border-neutral-700">ts</th>
+                        <th className="text-right font-medium px-1.5 py-1 border-b border-neutral-700">Ask</th>
+                        <th className="text-right font-medium px-1.5 py-1 border-b border-neutral-700">Prev Mid</th>
+                        <th className="text-right font-medium px-1.5 py-1 border-b border-neutral-700">Gap</th>
+                        <th className="text-right font-medium px-1.5 py-1 border-b border-neutral-700">Bid</th>
+                        <th className="text-right font-medium px-1.5 py-1 border-b border-neutral-700">Spread</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {nearMisses.slice(0, 100).map((nm, i) => (
+                        <tr key={i} className="text-neutral-200 border-t border-neutral-700/40">
+                          <td className="px-1.5 py-0.5 text-right text-neutral-600">{nm.ts}</td>
+                          <td className="px-1.5 py-0.5 text-right" style={{ color: "#f87171" }}>{nm.ask}</td>
+                          <td className="px-1.5 py-0.5 text-right text-neutral-400">{nm.prevMid.toFixed(1)}</td>
+                          <td className="px-1.5 py-0.5 text-right" style={{ color: nm.gap < 0 ? "#f87171" : "#f59e0b" }}>
+                            {nm.gap.toFixed(1)}
+                          </td>
+                          <td className="px-1.5 py-0.5 text-right text-neutral-400">
+                            {nm.bid === null ? "-" : nm.bid}
+                          </td>
+                          <td className="px-1.5 py-0.5 text-right text-neutral-400">
+                            {nm.spread === null ? "-" : nm.spread.toFixed(0)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {nearMisses.length > 100 && (
+                  <div className="text-[9px] text-neutral-600 mt-1">
+                    Showing first 100 of {nearMisses.length} near misses.
+                  </div>
+                )}
+                <div className="text-[9px] text-neutral-600 mt-1 leading-snug">
+                  Moments where the ask came within half the avg spread of
+                  the previous mid but no fill occurred. Negative gap =
+                  ask crossed below prev mid. Study what was different at
+                  these timestamps to find the taker bot&apos;s boundary.
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ZoomTradeTable({
+  trades,
+  activities,
+  product,
+  zoomRange,
+}: {
+  trades: Trade[];
+  activities: ActivityRow[];
+  product: string | null;
+  zoomRange: { min: number; max: number } | null;
+}) {
+  if (!product) {
+    return <div className="text-[11px] text-neutral-500">Select a product.</div>;
+  }
+
+  type FullSnap = {
+    bid1: number | null; bid2: number | null; bid3: number | null;
+    ask1: number | null; ask2: number | null; ask3: number | null;
+    bidVol1: number | null; bidVol2: number | null; bidVol3: number | null;
+    askVol1: number | null; askVol2: number | null; askVol3: number | null;
+    mid: number | null;
+  };
+
+  const snapByTs = new Map<number, FullSnap>();
+  const sortedTs: number[] = [];
+  for (const r of activities) {
+    if (r.product !== product) continue;
+    snapByTs.set(r.timestamp, {
+      bid1: r.bidPrice1, bid2: r.bidPrice2, bid3: r.bidPrice3,
+      ask1: r.askPrice1, ask2: r.askPrice2, ask3: r.askPrice3,
+      bidVol1: r.bidVolume1, bidVol2: r.bidVolume2, bidVol3: r.bidVolume3,
+      askVol1: r.askVolume1, askVol2: r.askVolume2, askVol3: r.askVolume3,
+      mid: (r.bidPrice1 !== null && r.askPrice1 !== null) ? r.midPrice : null,
+    });
+    sortedTs.push(r.timestamp);
+  }
+  sortedTs.sort((a, b) => a - b);
+
+  const prevMidAt = (ts: number): number | null => {
+    let lo = 0, hi = sortedTs.length - 1, ans = -1;
+    while (lo <= hi) {
+      const m = (lo + hi) >> 1;
+      if (sortedTs[m] < ts) { ans = m; lo = m + 1; } else hi = m - 1;
+    }
+    if (ans < 0) return null;
+    return snapByTs.get(sortedTs[ans])?.mid ?? null;
+  };
+
+  const wallMidAt = (snap: FullSnap): number | null => {
+    const bidLevels: [number | null, number | null][] = [
+      [snap.bid1, snap.bidVol1],
+      [snap.bid2, snap.bidVol2],
+      [snap.bid3, snap.bidVol3],
+    ];
+    const askLevels: [number | null, number | null][] = [
+      [snap.ask1, snap.askVol1],
+      [snap.ask2, snap.askVol2],
+      [snap.ask3, snap.askVol3],
+    ];
+    let wallBid: number | null = null, wallBidVol = -1;
+    for (const [p, v] of bidLevels) {
+      if (p !== null && v !== null && v > wallBidVol) {
+        wallBid = p;
+        wallBidVol = v;
+      }
+    }
+    let wallAsk: number | null = null, wallAskVol = -1;
+    for (const [p, v] of askLevels) {
+      if (p !== null && v !== null && v > wallAskVol) {
+        wallAsk = p;
+        wallAskVol = v;
+      }
+    }
+    if (wallBid === null || wallAsk === null) return null;
+    return (wallBid + wallAsk) / 2;
+  };
+
+  const filtered: Trade[] = [];
+  for (const t of trades) {
+    if (t.symbol !== product) continue;
+    if (zoomRange && (t.timestamp < zoomRange.min || t.timestamp > zoomRange.max)) continue;
+    filtered.push(t);
+  }
+
+  type Row = {
+    price: number;
+    size: number;
+    side: "buy" | "sell" | "neutral";
+    bestBid: number | null;
+    bestAsk: number | null;
+    prevMid: number | null;
+    wallMid: number | null;
+    ts: number;
+  };
+
+  const rows: Row[] = [];
+  for (const t of filtered) {
+    const snap = snapByTs.get(t.timestamp);
+    const mid = snap?.mid ?? null;
+    const side: Row["side"] =
+      mid !== null
+        ? t.price > mid ? "buy" : t.price < mid ? "sell" : "neutral"
+        : "neutral";
+    rows.push({
+      price: t.price,
+      size: Math.abs(t.quantity),
+      side,
+      bestBid: snap?.bid1 ?? null,
+      bestAsk: snap?.ask1 ?? null,
+      prevMid: prevMidAt(t.timestamp),
+      wallMid: snap ? wallMidAt(snap) : null,
+      ts: t.timestamp,
+    });
+  }
+
+  const cell = (v: number | null) =>
+    v === null ? <span className="text-neutral-600">-</span> : v;
+  const cellFmt = (v: number | null, decimals = 1) =>
+    v === null ? <span className="text-neutral-600">-</span> : v.toFixed(decimals);
+
+  if (rows.length === 0) {
+    return (
+      <div className="text-[11px] text-neutral-500">
+        {zoomRange ? "No trades in zoomed range." : "No trades loaded. Zoom in to filter."}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="text-[9px] text-neutral-600 font-mono">
+        {rows.length.toLocaleString()} trades
+        {zoomRange ? (
+          <span className="text-amber-400 ml-1">in zoom</span>
+        ) : (
+          <span className="ml-1">(zoom chart to filter)</span>
+        )}
+      </div>
+      <div className="overflow-x-auto border border-neutral-700 max-h-[400px] overflow-y-auto">
+        <table className="w-full border-collapse text-[10px] font-mono whitespace-nowrap">
+          <thead className="sticky top-0 bg-[#2e3137] z-10">
+            <tr className="text-[9px] uppercase tracking-wider text-neutral-500">
+              <th className="text-right font-medium px-1.5 py-1 border-b border-neutral-700">Price</th>
+              <th className="text-right font-medium px-1.5 py-1 border-b border-neutral-700">Size</th>
+              <th className="text-center font-medium px-1.5 py-1 border-b border-neutral-700">Side</th>
+              <th className="text-right font-medium px-1.5 py-1 border-b border-neutral-700">Bid</th>
+              <th className="text-right font-medium px-1.5 py-1 border-b border-neutral-700">Ask</th>
+              <th className="text-right font-medium px-1.5 py-1 border-b border-neutral-700">Prev Mid</th>
+              <th className="text-right font-medium px-1.5 py-1 border-b border-neutral-700">Wall Mid</th>
+              <th className="text-right font-medium px-1.5 py-1 border-b border-neutral-700">ts</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => {
+              const bg = r.side === "buy" ? BID_TINT : r.side === "sell" ? ASK_TINT : undefined;
+              const sideLabel = r.side === "buy" ? "▲" : r.side === "sell" ? "▼" : "—";
+              const sideColor = r.side === "buy" ? "#4ade80" : r.side === "sell" ? "#f87171" : "#737373";
+              return (
+                <tr
+                  key={i}
+                  className="text-neutral-200 border-t border-neutral-700/40"
+                  style={bg ? { backgroundColor: bg } : undefined}
+                >
+                  <td className="px-1.5 py-0.5 text-right">{r.price}</td>
+                  <td className="px-1.5 py-0.5 text-right">{r.size}</td>
+                  <td className="px-1.5 py-0.5 text-center" style={{ color: sideColor }}>{sideLabel}</td>
+                  <td className="px-1.5 py-0.5 text-right text-neutral-400">{cell(r.bestBid)}</td>
+                  <td className="px-1.5 py-0.5 text-right text-neutral-400">{cell(r.bestAsk)}</td>
+                  <td className="px-1.5 py-0.5 text-right text-neutral-400">{cellFmt(r.prevMid)}</td>
+                  <td className="px-1.5 py-0.5 text-right text-neutral-400">{cellFmt(r.wallMid)}</td>
+                  <td className="px-1.5 py-0.5 text-right text-neutral-600">{r.ts}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function PanelSection({
   title,
   open,
@@ -1070,6 +1609,22 @@ type GenInfo = {
   products: Record<string, GenInfoProduct>;
 };
 
+type Segment = {
+  startTs: number;
+  slopeMultiplier: number;
+  noiseMultiplier: number;
+  levelShift: number;
+};
+
+type ProductDaySegments = Segment[][];
+
+const DEFAULT_SEGMENT: Segment = {
+  startTs: 0,
+  slopeMultiplier: 1,
+  noiseMultiplier: 1,
+  levelShift: 0,
+};
+
 function GeneratorSection({
   round,
   onGenerated,
@@ -1081,17 +1636,23 @@ function GeneratorSection({
   const [duration, setDuration] = useState(1_000_000);
   const [step, setStep] = useState(100);
   const [seed, setSeed] = useState<string>("");
+  const [numDays, setNumDays] = useState<1 | 2>(1);
   const [modes, setModes] = useState<Record<string, SimMode>>({});
   const [smoothing, setSmoothing] = useState<Record<string, number>>({});
-  const [overrides, setOverrides] = useState<Record<string, Overrides>>({});
-  const [overridesOpen, setOverridesOpen] = useState<Record<string, boolean>>({});
+  // segments[product] = [[day0 segments], [day1 segments]]
+  const [segments, setSegments] = useState<Record<string, ProductDaySegments>>({});
+  const [selectedSegment, setSelectedSegment] = useState<{
+    product: string;
+    day: number;
+    index: number;
+  } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{
     day: number;
-    pricesPath: string;
-    tradesPath: string;
-    stats: { products: number; snapshots: number; activityRows: number; trades: number };
+    days?: number[];
+    paths?: string[];
+    stats: { products: number; numDays?: number; snapshotsPerDay?: number; snapshots?: number; activityRows: number; trades: number };
   } | null>(null);
 
   useEffect(() => {
@@ -1100,8 +1661,8 @@ function GeneratorSection({
     setInfo(null);
     setModes({});
     setSmoothing({});
-    setOverrides({});
-    setOverridesOpen({});
+    setSegments({});
+    setSelectedSegment(null);
     if (round === null) return;
     fetch(`/api/simulation/generate?round=${round}`)
       .then((r) => r.json())
@@ -1109,18 +1670,54 @@ function GeneratorSection({
         setInfo(j);
         const initialModes: Record<string, SimMode> = {};
         const initialSmoothing: Record<string, number> = {};
-        const initialOverrides: Record<string, Overrides> = {};
+        const initialSegments: Record<string, ProductDaySegments> = {};
         for (const [name, p] of Object.entries(j.products)) {
           initialModes[name] = p.suggestedMode;
           initialSmoothing[name] = p.suggestedSmoothing ?? FALLBACK_SMOOTHING;
-          initialOverrides[name] = { ...DEFAULT_OVERRIDES };
+          initialSegments[name] = [[{ ...DEFAULT_SEGMENT }], [{ ...DEFAULT_SEGMENT }]];
         }
         setModes(initialModes);
         setSmoothing(initialSmoothing);
-        setOverrides(initialOverrides);
+        setSegments(initialSegments);
       })
       .catch(() => {});
   }, [round]);
+
+  function updateSegment(product: string, day: number, index: number, patch: Partial<Segment>) {
+    setSegments((prev) => {
+      const ps = prev[product] ?? [[{ ...DEFAULT_SEGMENT }], [{ ...DEFAULT_SEGMENT }]];
+      const daySegs = [...ps[day]];
+      daySegs[index] = { ...daySegs[index], ...patch };
+      const next = [...ps];
+      next[day] = daySegs;
+      return { ...prev, [product]: next as ProductDaySegments };
+    });
+  }
+
+  function addBreakpoint(product: string, day: number, ts: number) {
+    setSegments((prev) => {
+      const ps = prev[product] ?? [[{ ...DEFAULT_SEGMENT }], [{ ...DEFAULT_SEGMENT }]];
+      const daySegs = [...ps[day], { ...DEFAULT_SEGMENT, startTs: ts }];
+      daySegs.sort((a, b) => a.startTs - b.startTs);
+      const next = [...ps];
+      next[day] = daySegs;
+      return { ...prev, [product]: next as ProductDaySegments };
+    });
+  }
+
+  function removeBreakpoint(product: string, day: number, index: number) {
+    if (index === 0) return; // can't remove the first segment
+    setSegments((prev) => {
+      const ps = prev[product] ?? [[{ ...DEFAULT_SEGMENT }], [{ ...DEFAULT_SEGMENT }]];
+      const daySegs = ps[day].filter((_, i) => i !== index);
+      const next = [...ps];
+      next[day] = daySegs;
+      return { ...prev, [product]: next as ProductDaySegments };
+    });
+    if (selectedSegment?.product === product && selectedSegment.day === day && selectedSegment.index === index) {
+      setSelectedSegment(null);
+    }
+  }
 
   async function run() {
     if (round === null || info === null) return;
@@ -1128,12 +1725,24 @@ function GeneratorSection({
     setError(null);
     setResult(null);
     try {
-      const productModes: Record<string, { mode: SimMode; smoothing: number; overrides: Overrides }> = {};
+      const productModes: Record<string, {
+        mode: SimMode;
+        smoothing: number;
+        days: { segments: { startTs: number; slopeMultiplier: number; noiseMultiplier?: number; levelShift?: number }[] }[];
+      }> = {};
       for (const name of Object.keys(modes)) {
+        const ps = segments[name] ?? [[{ ...DEFAULT_SEGMENT }], [{ ...DEFAULT_SEGMENT }]];
         productModes[name] = {
           mode: modes[name],
           smoothing: smoothing[name] ?? info.products[name]?.suggestedSmoothing ?? FALLBACK_SMOOTHING,
-          overrides: overrides[name] ?? DEFAULT_OVERRIDES,
+          days: Array.from({ length: numDays }, (_, d) => ({
+            segments: (ps[d] ?? [{ ...DEFAULT_SEGMENT }]).map((s) => ({
+              startTs: s.startTs,
+              slopeMultiplier: s.slopeMultiplier,
+              noiseMultiplier: s.noiseMultiplier,
+              levelShift: s.levelShift,
+            })),
+          })),
         };
       }
       const body: Record<string, unknown> = {
@@ -1141,6 +1750,7 @@ function GeneratorSection({
         day: info.nextDay,
         durationTimestamps: duration,
         step,
+        numDays,
         productModes,
       };
       if (seed.trim() !== "") body.seed = Number(seed);
@@ -1157,8 +1767,8 @@ function GeneratorSection({
       const j = await res.json();
       setResult({
         day: j.day,
-        pricesPath: j.pricesPath,
-        tradesPath: j.tradesPath,
+        days: j.days,
+        paths: j.paths,
         stats: j.stats,
       });
       if (onGenerated) onGenerated(j.day);
@@ -1169,231 +1779,161 @@ function GeneratorSection({
     }
   }
 
-  function updateOverride<K extends keyof Overrides>(name: string, key: K, value: Overrides[K]) {
-    setOverrides((prev) => ({
-      ...prev,
-      [name]: { ...(prev[name] ?? DEFAULT_OVERRIDES), [key]: value },
-    }));
-  }
-
-  function resetOverrides(name: string) {
-    setOverrides((prev) => ({ ...prev, [name]: { ...DEFAULT_OVERRIDES } }));
-  }
-
-  function isOverrideActive(o: Overrides) {
-    return o.slopeMultiplier !== 1 || o.noiseMultiplier !== 1 || o.levelShift !== 0;
-  }
-
   const productNames = info ? Object.keys(info.products).sort() : [];
+  const sel = selectedSegment;
+  const selSeg = sel
+    ? segments[sel.product]?.[sel.day]?.[sel.index] ?? null
+    : null;
 
   return (
     <div className="flex flex-col gap-2.5">
       <div className="text-[11px] text-neutral-500 leading-relaxed">
-        Generates the next day forward. Use overrides to test scenarios:
-        slow/speed/reverse a trend, spike volatility, or shift a price level.
+        Define multi-segment trend scenarios per product per day. Click the
+        timeline to add breakpoints. Click a segment to edit its slope, noise
+        and level shift.
       </div>
 
       <div className="grid grid-cols-2 gap-2">
         <Field label="Day (auto)">
-          <input
-            type="number"
-            value={info?.nextDay ?? ""}
-            disabled
-            className="w-full border border-neutral-700 bg-[#1d1f23] text-neutral-400 px-2 py-1 text-[11px] cursor-not-allowed"
-          />
+          <input type="number" value={info?.nextDay ?? ""} disabled
+            className="w-full border border-neutral-700 bg-[#1d1f23] text-neutral-400 px-2 py-1 text-[11px] cursor-not-allowed" />
         </Field>
-        <Field label="Duration (ts)">
-          <input
-            type="number"
-            value={duration}
-            onChange={(e) => setDuration(Number(e.target.value))}
-            className="w-full border border-neutral-600 bg-[#2a2d31] text-neutral-200 px-2 py-1 text-[11px] focus:border-neutral-300 focus:outline-none"
-          />
+        <Field label="Days to generate">
+          <select value={numDays} onChange={(e) => setNumDays(Number(e.target.value) as 1 | 2)}
+            className="w-full border border-neutral-600 bg-[#2a2d31] text-neutral-200 px-2 py-1 text-[11px] focus:border-neutral-300 focus:outline-none">
+            <option value={1}>1 day</option>
+            <option value={2}>2 days</option>
+          </select>
+        </Field>
+        <Field label="Duration / day (ts)">
+          <input type="number" value={duration} onChange={(e) => setDuration(Number(e.target.value))}
+            className="w-full border border-neutral-600 bg-[#2a2d31] text-neutral-200 px-2 py-1 text-[11px] focus:border-neutral-300 focus:outline-none" />
         </Field>
         <Field label="Step">
-          <input
-            type="number"
-            value={step}
-            onChange={(e) => setStep(Number(e.target.value))}
-            className="w-full border border-neutral-600 bg-[#2a2d31] text-neutral-200 px-2 py-1 text-[11px] focus:border-neutral-300 focus:outline-none"
-          />
+          <input type="number" value={step} onChange={(e) => setStep(Number(e.target.value))}
+            className="w-full border border-neutral-600 bg-[#2a2d31] text-neutral-200 px-2 py-1 text-[11px] focus:border-neutral-300 focus:outline-none" />
         </Field>
         <Field label="Seed (optional)">
-          <input
-            type="text"
-            value={seed}
-            placeholder="random"
-            onChange={(e) => setSeed(e.target.value)}
-            className="w-full border border-neutral-600 bg-[#2a2d31] text-neutral-200 px-2 py-1 text-[11px] focus:border-neutral-300 focus:outline-none placeholder-neutral-600"
-          />
+          <input type="text" value={seed} placeholder="random" onChange={(e) => setSeed(e.target.value)}
+            className="w-full border border-neutral-600 bg-[#2a2d31] text-neutral-200 px-2 py-1 text-[11px] focus:border-neutral-300 focus:outline-none placeholder-neutral-600" />
         </Field>
       </div>
 
       {info && productNames.length > 0 && (
-        <div className="flex flex-col gap-1.5">
-          <div className="text-[10px] uppercase tracking-wider text-neutral-500">Per-product configuration</div>
+        <div className="flex flex-col gap-2">
           {productNames.map((name) => {
             const p = info.products[name];
             const mode = modes[name] ?? p.suggestedMode;
             const sm = smoothing[name] ?? p.suggestedSmoothing ?? FALLBACK_SMOOTHING;
             const suggested = p.suggestedSmoothing ?? FALLBACK_SMOOTHING;
-            const onSuggested = Math.abs(sm - suggested) < 0.0001;
-            const ov = overrides[name] ?? DEFAULT_OVERRIDES;
-            const isOpen = overridesOpen[name] ?? false;
-            const overrideActive = isOverrideActive(ov);
+            const ps = segments[name] ?? [[{ ...DEFAULT_SEGMENT }], [{ ...DEFAULT_SEGMENT }]];
+
             return (
               <div key={name} className="bg-[#2a2d31] border border-neutral-700/60 px-2 py-2 flex flex-col gap-1.5">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[11px] text-neutral-200 font-mono truncate">{name}</span>
-                  <select
-                    value={mode}
-                    onChange={(e) =>
-                      setModes((prev) => ({ ...prev, [name]: e.target.value as SimMode }))
-                    }
-                    className="border border-neutral-600 bg-[#1d1f23] text-neutral-200 px-1.5 py-0.5 text-[10px] focus:border-neutral-300 focus:outline-none"
-                  >
-                    <option value="meanRevert" className="bg-[#1d1f23]">Mean revert</option>
-                    <option value="linearTrend" className="bg-[#1d1f23]">Linear trend</option>
+                  <select value={mode}
+                    onChange={(e) => setModes((prev) => ({ ...prev, [name]: e.target.value as SimMode }))}
+                    className="border border-neutral-600 bg-[#1d1f23] text-neutral-200 px-1.5 py-0.5 text-[10px] focus:border-neutral-300 focus:outline-none">
+                    <option value="meanRevert">Mean revert</option>
+                    <option value="linearTrend">Linear trend</option>
                   </select>
                 </div>
                 <div className="text-[9px] text-neutral-500 font-mono">
                   {mode === "meanRevert"
                     ? `fair ${p.fairPrice.toFixed(1)}`
-                    : `slope ${p.slopePerStep.toExponential(2)}/step · intercept ${p.intercept.toFixed(1)}`}
+                    : `slope ${p.slopePerStep.toExponential(2)}/step`}
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-[9px] uppercase tracking-wider text-neutral-500 w-16">Smoothing</span>
-                  <input
-                    type="range"
-                    min={0.005}
-                    max={0.5}
-                    step={0.005}
-                    value={sm}
-                    onChange={(e) =>
-                      setSmoothing((prev) => ({ ...prev, [name]: Number(e.target.value) }))
-                    }
-                    className="flex-1 accent-neutral-300"
-                  />
-                  <span className="text-[10px] text-neutral-300 font-mono w-12 text-right">
-                    {sm.toFixed(3)}
-                  </span>
+                  <input type="range" min={0.005} max={0.5} step={0.005} value={sm}
+                    onChange={(e) => setSmoothing((prev) => ({ ...prev, [name]: Number(e.target.value) }))}
+                    className="flex-1 accent-neutral-300" />
+                  <span className="text-[10px] text-neutral-300 font-mono w-12 text-right">{sm.toFixed(3)}</span>
                 </div>
-                <div className="flex items-center justify-between text-[9px] text-neutral-600">
-                  <span>
-                    Suggested: <span className="text-neutral-400 font-mono">{suggested.toFixed(3)}</span>
-                    {onSuggested && <span className="text-emerald-500 ml-1">●</span>}
-                  </span>
-                  {!onSuggested && (
-                    <button
-                      onClick={() => setSmoothing((prev) => ({ ...prev, [name]: suggested }))}
-                      className="text-neutral-400 hover:text-neutral-200 underline"
-                    >
-                      reset
-                    </button>
-                  )}
-                </div>
-
-                <button
-                  onClick={() => setOverridesOpen((prev) => ({ ...prev, [name]: !isOpen }))}
-                  className="flex items-center justify-between gap-2 mt-1 pt-1.5 border-t border-neutral-700/60 hover:bg-[#2e3137] -mx-2 px-2 transition-colors"
-                >
-                  <span className="text-[10px] uppercase tracking-wider text-neutral-400 flex items-center gap-1.5">
-                    Scenario Overrides
-                    {overrideActive && <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />}
-                  </span>
-                  <span className="text-neutral-500 text-[10px]">{isOpen ? "▾" : "▸"}</span>
-                </button>
-
-                {isOpen && (
-                  <div className="flex flex-col gap-2 pt-1">
-                    {mode === "linearTrend" && (
-                      <SliderRow
-                        label="Slope ×"
-                        min={-3}
-                        max={3}
-                        step={0.05}
-                        value={ov.slopeMultiplier}
-                        format={(v) => `${v.toFixed(2)}×`}
-                        onChange={(v) => updateOverride(name, "slopeMultiplier", v)}
-                        hints={[
-                          { value: 0, label: "flat" },
-                          { value: 1, label: "normal" },
-                          { value: -1, label: "reverse" },
-                        ]}
-                      />
-                    )}
-                    <SliderRow
-                      label="Noise ×"
-                      min={0}
-                      max={5}
-                      step={0.1}
-                      value={ov.noiseMultiplier}
-                      format={(v) => `${v.toFixed(1)}×`}
-                      onChange={(v) => updateOverride(name, "noiseMultiplier", v)}
-                      hints={[
-                        { value: 0, label: "calm" },
-                        { value: 1, label: "normal" },
-                        { value: 3, label: "spike" },
-                      ]}
-                    />
-                    <SliderRow
-                      label="Level shift"
-                      min={-200}
-                      max={200}
-                      step={1}
-                      value={ov.levelShift}
-                      format={(v) => (v > 0 ? `+${v.toFixed(0)}` : v.toFixed(0))}
-                      onChange={(v) => updateOverride(name, "levelShift", v)}
-                      hints={[{ value: 0, label: "none" }]}
-                    />
-                    <div className="flex flex-col gap-1">
-                      <label className="flex items-center gap-2 text-[10px] text-neutral-400 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={ov.applyAfterTimestamp !== null}
-                          onChange={(e) =>
-                            updateOverride(
-                              name,
-                              "applyAfterTimestamp",
-                              e.target.checked ? Math.floor(duration / 2) : null
-                            )
-                          }
-                          className="accent-neutral-300"
-                        />
-                        Apply mid-day (kick in at timestamp)
-                      </label>
-                      {ov.applyAfterTimestamp !== null && (
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="range"
-                            min={0}
-                            max={duration}
-                            step={Math.max(1, Math.floor(duration / 100))}
-                            value={ov.applyAfterTimestamp}
-                            onChange={(e) =>
-                              updateOverride(name, "applyAfterTimestamp", Number(e.target.value))
-                            }
-                            className="flex-1 accent-neutral-300"
-                          />
-                          <span className="text-[10px] text-neutral-300 font-mono w-20 text-right">
-                            ts {ov.applyAfterTimestamp.toLocaleString()}
-                          </span>
-                        </div>
-                      )}
-                    </div>
-                    {overrideActive && (
-                      <button
-                        onClick={() => resetOverrides(name)}
-                        className="text-[10px] text-neutral-500 hover:text-neutral-200 underline self-start mt-1"
-                      >
-                        reset all overrides
-                      </button>
-                    )}
+                {Math.abs(sm - suggested) > 0.0001 && (
+                  <div className="flex items-center justify-between text-[9px] text-neutral-600">
+                    <span>Suggested: <span className="text-neutral-400 font-mono">{suggested.toFixed(3)}</span></span>
+                    <button onClick={() => setSmoothing((prev) => ({ ...prev, [name]: suggested }))}
+                      className="text-neutral-400 hover:text-neutral-200 underline">reset</button>
                   </div>
                 )}
+
+                {/* Per-day segment timelines */}
+                {Array.from({ length: numDays }, (_, dayIdx) => {
+                  const daySegs = ps[dayIdx] ?? [{ ...DEFAULT_SEGMENT }];
+                  return (
+                    <div key={dayIdx} className="mt-1 pt-1.5 border-t border-neutral-700/60">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[9px] uppercase tracking-wider text-neutral-500">
+                          Day {dayIdx + 1} segments ({daySegs.length})
+                        </span>
+                        <button
+                          onClick={() => {
+                            // Add at the midpoint of the last segment
+                            const lastSeg = daySegs[daySegs.length - 1];
+                            const lastEnd = duration;
+                            const midPoint = Math.round(((lastSeg.startTs + lastEnd) / 2) / 100) * 100;
+                            addBreakpoint(name, dayIdx, midPoint);
+                          }}
+                          className="text-[9px] text-neutral-400 hover:text-neutral-200 border border-neutral-600 px-1.5 py-0.5 hover:bg-[#2e3137] transition-colors"
+                        >
+                          + Add breakpoint
+                        </button>
+                      </div>
+                      {/* Timeline bar */}
+                      <SegmentTimeline
+                        segments={daySegs}
+                        duration={duration}
+                        selected={sel?.product === name && sel.day === dayIdx ? sel.index : null}
+                        onSelect={(i) => setSelectedSegment({ product: name, day: dayIdx, index: i })}
+                        onAddBreakpoint={(ts) => addBreakpoint(name, dayIdx, ts)}
+                        onDragBreakpoint={(i, ts) => updateSegment(name, dayIdx, i, { startTs: ts })}
+                        mode={mode}
+                      />
+                      {/* Mini trend preview */}
+                      <TrendPreview segments={daySegs} duration={duration} mode={mode} />
+                    </div>
+                  );
+                })}
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* Selected segment editor */}
+      {sel && selSeg && (
+        <div className="bg-[#2e3137] border border-neutral-600 px-2 py-2 flex flex-col gap-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-neutral-300 font-mono">
+              {sel.product} · Day {sel.day + 1} · Seg {sel.index + 1}
+            </span>
+            {sel.index > 0 && (
+              <button onClick={() => removeBreakpoint(sel.product, sel.day, sel.index)}
+                className="text-[9px] text-red-400 hover:text-red-300 underline">
+                remove
+              </button>
+            )}
+          </div>
+          <div className="text-[9px] text-neutral-500 font-mono">
+            starts at ts {selSeg.startTs.toLocaleString()}
+          </div>
+          <SliderRow label="Slope ×" min={-3} max={3} step={0.05} value={selSeg.slopeMultiplier}
+            format={(v) => `${v.toFixed(2)}×`}
+            onChange={(v) => updateSegment(sel.product, sel.day, sel.index, { slopeMultiplier: v })}
+            hints={[{ value: 0, label: "flat" }, { value: 1, label: "normal" }, { value: -1, label: "reverse" }]}
+          />
+          <SliderRow label="Noise ×" min={0} max={5} step={0.1} value={selSeg.noiseMultiplier}
+            format={(v) => `${v.toFixed(1)}×`}
+            onChange={(v) => updateSegment(sel.product, sel.day, sel.index, { noiseMultiplier: v })}
+            hints={[{ value: 0, label: "calm" }, { value: 1, label: "normal" }, { value: 3, label: "spike" }]}
+          />
+          <SliderRow label="Level shift" min={-200} max={200} step={1} value={selSeg.levelShift}
+            format={(v) => (v > 0 ? `+${v.toFixed(0)}` : v.toFixed(0))}
+            onChange={(v) => updateSegment(sel.product, sel.day, sel.index, { levelShift: v })}
+            hints={[{ value: 0, label: "none" }]}
+          />
         </div>
       )}
 
@@ -1404,12 +1944,10 @@ function GeneratorSection({
       )}
 
       <div>
-        <button
-          onClick={run}
+        <button onClick={run}
           disabled={loading || round === null || info === null || !info.hasFeatures}
-          className="border border-neutral-300 bg-neutral-700 text-neutral-100 hover:bg-neutral-600 px-2 py-1 text-[11px] disabled:opacity-50 disabled:cursor-default"
-        >
-          {loading ? "Generating..." : `Generate day ${info?.nextDay ?? ""}`}
+          className="border border-neutral-300 bg-neutral-700 text-neutral-100 hover:bg-neutral-600 px-2 py-1 text-[11px] disabled:opacity-50 disabled:cursor-default">
+          {loading ? "Generating..." : `Generate ${numDays} day${numDays > 1 ? "s" : ""} from day ${info?.nextDay ?? ""}`}
         </button>
       </div>
 
@@ -1422,21 +1960,202 @@ function GeneratorSection({
       {result && (
         <div className="bg-[#2a2d31] border border-emerald-900/60 px-2 py-2">
           <div className="text-[11px] text-emerald-400 mb-1.5">
-            Generated day {result.day}
+            Generated {result.days ? result.days.join(", ") : `day ${result.day}`}
           </div>
           <div className="text-[10px] text-neutral-400 font-mono leading-snug">
             <div>products: {result.stats.products}</div>
-            <div>snapshots: {result.stats.snapshots.toLocaleString()}</div>
+            <div>days: {result.stats.numDays ?? 1}</div>
             <div>activity rows: {result.stats.activityRows.toLocaleString()}</div>
             <div>trades: {result.stats.trades.toLocaleString()}</div>
-          </div>
-          <div className="mt-2 text-[10px] text-neutral-500 font-mono break-all">
-            <div>{result.pricesPath}</div>
-            <div>{result.tradesPath}</div>
           </div>
         </div>
       )}
     </div>
+  );
+}
+
+/** Visual segment timeline bar. Click to add breakpoint, click segment to select, drag dividers. */
+function SegmentTimeline({
+  segments,
+  duration,
+  selected,
+  onSelect,
+  onAddBreakpoint,
+  onDragBreakpoint,
+  mode,
+}: {
+  segments: Segment[];
+  duration: number;
+  selected: number | null;
+  onSelect: (i: number) => void;
+  onAddBreakpoint: (ts: number) => void;
+  onDragBreakpoint: (i: number, ts: number) => void;
+  mode: SimMode;
+}) {
+  const barRef = useRef<HTMLDivElement>(null);
+  const [dragging, setDragging] = useState<number | null>(null);
+
+  const sorted = [...segments].sort((a, b) => a.startTs - b.startTs);
+
+  const segmentColor = (s: Segment) => {
+    if (mode === "meanRevert") return "rgba(163,163,163,0.3)";
+    const m = s.slopeMultiplier;
+    if (m > 0.1) return `rgba(74,222,128,${Math.min(0.6, 0.2 + Math.abs(m) * 0.15)})`;
+    if (m < -0.1) return `rgba(248,113,113,${Math.min(0.6, 0.2 + Math.abs(m) * 0.15)})`;
+    return "rgba(163,163,163,0.25)";
+  };
+
+  const handleBarClick = (e: React.MouseEvent) => {
+    if (dragging !== null) return;
+    const bar = barRef.current;
+    if (!bar) return;
+    const rect = bar.getBoundingClientRect();
+    const pct = (e.clientX - rect.left) / rect.width;
+    const ts = Math.round(pct * duration / 100) * 100;
+    // Single click: select the segment under the cursor
+    for (let i = sorted.length - 1; i >= 0; i--) {
+      if (ts >= sorted[i].startTs) {
+        onSelect(i);
+        return;
+      }
+    }
+  };
+
+  const handleBarDoubleClick = (e: React.MouseEvent) => {
+    const bar = barRef.current;
+    if (!bar) return;
+    const rect = bar.getBoundingClientRect();
+    const pct = (e.clientX - rect.left) / rect.width;
+    const ts = Math.round(pct * duration / 100) * 100;
+    // Don't add at the same position as an existing breakpoint
+    const threshold = duration * 0.02;
+    for (const seg of sorted) {
+      if (Math.abs(ts - seg.startTs) < threshold) return;
+    }
+    onAddBreakpoint(Math.max(100, Math.min(duration - 100, ts)));
+  };
+
+  const handleMouseDown = (e: React.MouseEvent, segIdx: number) => {
+    if (segIdx === 0) return; // can't drag the first divider (always at 0)
+    e.stopPropagation();
+    setDragging(segIdx);
+    const handleMove = (me: MouseEvent) => {
+      const bar = barRef.current;
+      if (!bar) return;
+      const rect = bar.getBoundingClientRect();
+      const pct = Math.max(0.01, Math.min(0.99, (me.clientX - rect.left) / rect.width));
+      const ts = Math.round(pct * duration / 100) * 100;
+      onDragBreakpoint(segIdx, ts);
+    };
+    const handleUp = () => {
+      setDragging(null);
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+  };
+
+  return (
+    <div
+      ref={barRef}
+      onClick={handleBarClick}
+      onDoubleClick={handleBarDoubleClick}
+      className="relative h-6 bg-neutral-800 border border-neutral-700 cursor-pointer select-none overflow-hidden"
+      title="Click to select segment · Double-click to add breakpoint · Drag dividers to move"
+    >
+      {sorted.map((s, i) => {
+        const startPct = (s.startTs / duration) * 100;
+        const endTs = i < sorted.length - 1 ? sorted[i + 1].startTs : duration;
+        const widthPct = ((endTs - s.startTs) / duration) * 100;
+        const isSelected = selected === i;
+        return (
+          <div
+            key={i}
+            className="absolute top-0 h-full flex items-center justify-center"
+            style={{
+              left: `${startPct}%`,
+              width: `${widthPct}%`,
+              backgroundColor: segmentColor(s),
+              borderRight: i < sorted.length - 1 ? "2px solid #525252" : "none",
+              outline: isSelected ? "2px solid #fbbf24" : "none",
+              outlineOffset: "-2px",
+              zIndex: isSelected ? 2 : 1,
+            }}
+            onClick={(e) => { e.stopPropagation(); onSelect(i); }}
+          >
+            <span className="text-[8px] text-neutral-300 font-mono truncate px-0.5">
+              {s.slopeMultiplier.toFixed(1)}×
+            </span>
+          </div>
+        );
+      })}
+      {/* Draggable dividers */}
+      {sorted.map((s, i) => {
+        if (i === 0) return null;
+        const pct = (s.startTs / duration) * 100;
+        return (
+          <div
+            key={`div-${i}`}
+            className="absolute top-0 h-full w-2 cursor-col-resize z-10"
+            style={{ left: `calc(${pct}% - 4px)` }}
+            onMouseDown={(e) => handleMouseDown(e, i)}
+            title={`ts ${s.startTs.toLocaleString()} — drag to move`}
+          >
+            <div className="w-0.5 h-full bg-neutral-400 mx-auto" />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Mini SVG preview of the trend shape given segments. */
+function TrendPreview({
+  segments,
+  duration,
+  mode,
+}: {
+  segments: Segment[];
+  duration: number;
+  mode: SimMode;
+}) {
+  if (mode === "meanRevert") {
+    return (
+      <div className="h-4 flex items-center justify-center">
+        <div className="w-full h-px bg-neutral-600" style={{ marginTop: 0 }} />
+      </div>
+    );
+  }
+  const sorted = [...segments].sort((a, b) => a.startTs - b.startTs);
+  const W = 200;
+  const H = 20;
+  const points: { x: number; y: number }[] = [];
+  let y = H / 2;
+  const steps = 50;
+  for (let s = 0; s <= steps; s++) {
+    const ts = (s / steps) * duration;
+    let activeSeg = sorted[0];
+    for (const seg of sorted) {
+      if (seg.startTs <= ts) activeSeg = seg;
+    }
+    const slope = activeSeg.slopeMultiplier;
+    y += slope * (duration / steps) * 0.00001;
+    points.push({ x: (s / steps) * W, y: Math.max(1, Math.min(H - 1, H / 2 + (y - H / 2))) });
+  }
+  // Normalize y range to fit
+  let minY = Infinity, maxY = -Infinity;
+  for (const p of points) { if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; }
+  const range = maxY - minY || 1;
+  const normalized = points.map((p) => ({
+    x: p.x,
+    y: 2 + (1 - (p.y - minY) / range) * (H - 4),
+  }));
+  const d = normalized.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ");
+  return (
+    <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="mt-0.5">
+      <path d={d} fill="none" stroke="#60a5fa" strokeWidth="1.5" />
+    </svg>
   );
 }
 

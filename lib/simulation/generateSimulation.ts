@@ -6,17 +6,36 @@ import {
   SimMode,
 } from "@/lib/simulation/extractFeatures";
 
-export type ProductOverrides = {
-  slopeMultiplier?: number;
+/** A single trend segment within a day. */
+export type TrendSegment = {
+  /** Timestamp (within the day) where this segment starts. */
+  startTs: number;
+  /** Slope multiplier relative to the base slope from extraction. */
+  slopeMultiplier: number;
+  /** Noise multiplier (1 = normal). */
   noiseMultiplier?: number;
+  /** Additive level shift applied in this segment. */
   levelShift?: number;
-  applyAfterTimestamp?: number | null;
+};
+
+/** Per-day configuration for a single product. */
+export type DayConfig = {
+  /** Ordered list of segments. First segment's startTs should be 0. */
+  segments: TrendSegment[];
 };
 
 export type ProductModeConfig = {
   mode: SimMode;
   smoothing?: number;
-  overrides?: ProductOverrides;
+  /** Per-day configs. Index 0 = first generated day, index 1 = second (if 2-day). */
+  days?: DayConfig[];
+  /** Legacy single-day overrides (used if `days` is not provided). */
+  overrides?: {
+    slopeMultiplier?: number;
+    noiseMultiplier?: number;
+    levelShift?: number;
+    applyAfterTimestamp?: number | null;
+  };
 };
 
 export type GeneratorParams = {
@@ -24,6 +43,8 @@ export type GeneratorParams = {
   step: number;
   seed?: number;
   startDay: number;
+  /** Number of days to generate (1 or 2). Default 1. */
+  numDays?: number;
   productModes?: Record<string, ProductModeConfig>;
 };
 
@@ -88,61 +109,98 @@ function generateLevelOrNull(
   return { price, volume: Math.max(1, Math.round(volume)) };
 }
 
-function generateProduct(
+/**
+ * Resolve the active segment at a given within-day timestamp.
+ * Segments are sorted by startTs. We pick the last one whose startTs <= ts.
+ */
+function activeSegment(segments: TrendSegment[], ts: number): TrendSegment {
+  let active = segments[0];
+  for (const seg of segments) {
+    if (seg.startTs <= ts) active = seg;
+    else break;
+  }
+  return active;
+}
+
+/** Convert legacy single-override format to a single-segment DayConfig. */
+function legacyToDayConfig(overrides?: ProductModeConfig["overrides"]): DayConfig {
+  if (!overrides) {
+    return { segments: [{ startTs: 0, slopeMultiplier: 1 }] };
+  }
+  if (overrides.applyAfterTimestamp !== null && overrides.applyAfterTimestamp !== undefined) {
+    // Two segments: normal until the kick-in, then overrides after
+    return {
+      segments: [
+        { startTs: 0, slopeMultiplier: 1, noiseMultiplier: 1, levelShift: 0 },
+        {
+          startTs: overrides.applyAfterTimestamp,
+          slopeMultiplier: overrides.slopeMultiplier ?? 1,
+          noiseMultiplier: overrides.noiseMultiplier ?? 1,
+          levelShift: overrides.levelShift ?? 0,
+        },
+      ],
+    };
+  }
+  return {
+    segments: [{
+      startTs: 0,
+      slopeMultiplier: overrides.slopeMultiplier ?? 1,
+      noiseMultiplier: overrides.noiseMultiplier ?? 1,
+      levelShift: overrides.levelShift ?? 0,
+    }],
+  };
+}
+
+function generateProductDay(
   pf: ProductFeatures,
   mode: SimMode,
   smoothing: number,
-  overrides: ProductOverrides,
-  params: GeneratorParams,
+  dayConfig: DayConfig,
+  durationTimestamps: number,
+  step: number,
+  dayNumber: number,
+  startMid: number,
+  startTrendValue: number,
   rng: () => number
-): GeneratorOutput {
+): { output: GeneratorOutput; endMid: number; endTrendValue: number } {
   const activities: ActivityRow[] = [];
   const trades: Trade[] = [];
 
-  const numSnapshots = Math.floor(params.durationTimestamps / params.step);
+  const numSnapshots = Math.floor(durationTimestamps / step);
   const tradeRatePerStep = pf.trades.perTimestepRate;
   const alpha = Math.max(0.001, Math.min(1, smoothing));
-
-  const slopeMult = overrides.slopeMultiplier ?? 1;
-  const noiseMult = overrides.noiseMultiplier ?? 1;
-  const levelShift = overrides.levelShift ?? 0;
-  const kickInTs =
-    overrides.applyAfterTimestamp === undefined || overrides.applyAfterTimestamp === null
-      ? 0
-      : overrides.applyAfterTimestamp;
-
-  const historicalLength = pf.mid.validSnapshotCount;
   const baseSlope = pf.mid.slopePerStep;
-  const baseTrendStart =
-    mode === "linearTrend"
-      ? pf.mid.intercept + pf.mid.slopePerStep * historicalLength
-      : pf.mid.fairPrice;
 
-  let trendValue = baseTrendStart;
+  // Sort segments by startTs
+  const segments = [...dayConfig.segments].sort((a, b) => a.startTs - b.startTs);
+  if (segments.length === 0) {
+    segments.push({ startTs: 0, slopeMultiplier: 1 });
+  }
+
+  let trendValue = startTrendValue;
   let smoothedNoise = 0;
-  let lastEffectiveSlope = mode === "linearTrend" ? baseSlope : 0;
+  let mid = startMid;
 
   for (let i = 0; i < numSnapshots; i++) {
-    const ts = i * params.step;
-    const overrideActive = ts >= kickInTs;
+    const withinDayTs = i * step;
+    const seg = activeSegment(segments, withinDayTs);
 
-    const effectiveSlopeMult = overrideActive ? slopeMult : 1;
-    const effectiveNoiseMult = overrideActive ? noiseMult : 1;
-    const effectiveLevelShift = overrideActive ? levelShift : 0;
+    const effectiveSlopeMult = seg.slopeMultiplier;
+    const effectiveNoiseMult = seg.noiseMultiplier ?? 1;
+    const effectiveLevelShift = seg.levelShift ?? 0;
 
     if (mode === "linearTrend") {
-      const newSlope = baseSlope * effectiveSlopeMult;
-      trendValue = trendValue + newSlope;
-      lastEffectiveSlope = newSlope;
+      trendValue = trendValue + baseSlope * effectiveSlopeMult;
     } else {
       trendValue = pf.mid.fairPrice;
     }
 
-    const noiseStd = (mode === "linearTrend" ? pf.mid.trendNoiseStd : pf.mid.noiseStd) * effectiveNoiseMult;
+    const noiseStd =
+      (mode === "linearTrend" ? pf.mid.trendNoiseStd : pf.mid.noiseStd) * effectiveNoiseMult;
     const newNoise = noiseStd * gaussian(rng);
     smoothedNoise = (1 - alpha) * smoothedNoise + alpha * newNoise;
 
-    const mid = trendValue + smoothedNoise + effectiveLevelShift;
+    mid = trendValue + smoothedNoise + effectiveLevelShift;
     const midRounded = Math.round(mid * 2) / 2;
 
     const bid1 = generateLevelOrNull(pf.book.bid[0], midRounded, "bid", rng);
@@ -157,9 +215,9 @@ function generateProduct(
     }
 
     activities.push({
-      timestamp: ts,
+      timestamp: withinDayTs,
       product: pf.product,
-      day: params.startDay,
+      day: dayNumber,
       bidPrice1: bid1.price,
       bidVolume1: bid1.volume,
       bidPrice2: bid2.price,
@@ -184,7 +242,10 @@ function generateProduct(
       let price: number;
       if (r < pf.trades.buyAggressorRate && ask1.price !== null) {
         price = ask1.price;
-      } else if (r < pf.trades.buyAggressorRate + pf.trades.sellAggressorRate && bid1.price !== null) {
+      } else if (
+        r < pf.trades.buyAggressorRate + pf.trades.sellAggressorRate &&
+        bid1.price !== null
+      ) {
         price = bid1.price;
       } else if (bid1.price !== null && ask1.price !== null) {
         price = Math.round((bid1.price + ask1.price) / 2);
@@ -192,7 +253,7 @@ function generateProduct(
         price = Math.round(midRounded);
       }
       trades.push({
-        timestamp: ts,
+        timestamp: withinDayTs,
         buyer: "",
         seller: "",
         symbol: pf.product,
@@ -203,52 +264,121 @@ function generateProduct(
     }
   }
 
-  void lastEffectiveSlope;
-  return { activities, trades };
+  return {
+    output: { activities, trades },
+    endMid: mid,
+    endTrendValue: trendValue,
+  };
 }
+
+export type MultiDayOutput = {
+  days: { day: number; activities: ActivityRow[]; trades: Trade[] }[];
+  allActivities: ActivityRow[];
+  allTrades: Trade[];
+};
 
 export function generateDay(
   features: FeatureSet,
   params: GeneratorParams
-): GeneratorOutput {
+): MultiDayOutput {
   const rng = makeRng(params.seed ?? Date.now());
-  const allActivities: ActivityRow[] = [];
-  const allTrades: Trade[] = [];
+  const numDays = Math.max(1, Math.min(2, params.numDays ?? 1));
+  const perDay = new Map<number, { activities: ActivityRow[]; trades: Trade[] }>();
 
   for (const product of Object.keys(features.products)) {
     const pf = features.products[product];
     const cfg = params.productModes?.[product];
     const mode = cfg?.mode ?? pf.mid.suggestedMode;
     const smoothing = cfg?.smoothing ?? DEFAULT_SMOOTHING;
-    const overrides = cfg?.overrides ?? {};
-    const { activities, trades } = generateProduct(pf, mode, smoothing, overrides, params, rng);
-    allActivities.push(...activities);
-    allTrades.push(...trades);
+
+    // Resolve per-day configs.
+    let dayConfigs: DayConfig[];
+    if (cfg?.days && cfg.days.length > 0) {
+      dayConfigs = cfg.days;
+    } else {
+      const single = legacyToDayConfig(cfg?.overrides);
+      dayConfigs = [single, single];
+    }
+
+    const historicalLength = pf.mid.validSnapshotCount;
+    let trendValue =
+      mode === "linearTrend"
+        ? pf.mid.intercept + pf.mid.slopePerStep * historicalLength
+        : pf.mid.fairPrice;
+    let mid = trendValue;
+
+    for (let d = 0; d < numDays; d++) {
+      const dayNumber = params.startDay + d;
+      const dayConf = dayConfigs[Math.min(d, dayConfigs.length - 1)];
+
+      const { output, endMid, endTrendValue } = generateProductDay(
+        pf,
+        mode,
+        smoothing,
+        dayConf,
+        params.durationTimestamps,
+        params.step,
+        dayNumber,
+        mid,
+        trendValue,
+        rng
+      );
+
+      if (!perDay.has(dayNumber)) {
+        perDay.set(dayNumber, { activities: [], trades: [] });
+      }
+      const bucket = perDay.get(dayNumber)!;
+      bucket.activities.push(...output.activities);
+      bucket.trades.push(...output.trades);
+
+      mid = endMid;
+      trendValue = endTrendValue;
+    }
   }
 
-  allActivities.sort((a, b) => a.timestamp - b.timestamp || a.product.localeCompare(b.product));
-  allTrades.sort((a, b) => a.timestamp - b.timestamp);
-  return { activities: allActivities, trades: allTrades };
+  const days: MultiDayOutput["days"] = [];
+  const allActivities: ActivityRow[] = [];
+  const allTrades: Trade[] = [];
+
+  for (const [dayNum, bucket] of Array.from(perDay.entries()).sort((a, b) => a[0] - b[0])) {
+    bucket.activities.sort((a, b) => a.timestamp - b.timestamp || a.product.localeCompare(b.product));
+    bucket.trades.sort((a, b) => a.timestamp - b.timestamp);
+    days.push({ day: dayNum, activities: bucket.activities, trades: bucket.trades });
+    allActivities.push(...bucket.activities);
+    allTrades.push(...bucket.trades);
+  }
+
+  return { days, allActivities, allTrades };
 }
 
 export function activitiesToCSV(rows: ActivityRow[], day: number): string {
-  const header = "day;timestamp;product;bid_price_1;bid_volume_1;bid_price_2;bid_volume_2;bid_price_3;bid_volume_3;ask_price_1;ask_volume_1;ask_price_2;ask_volume_2;ask_price_3;ask_volume_3;mid_price;profit_and_loss";
-  const fmt = (v: number | null | undefined) => (v === null || v === undefined ? "" : String(v));
+  const header =
+    "day;timestamp;product;bid_price_1;bid_volume_1;bid_price_2;bid_volume_2;bid_price_3;bid_volume_3;ask_price_1;ask_volume_1;ask_price_2;ask_volume_2;ask_price_3;ask_volume_3;mid_price;profit_and_loss";
+  const fmt = (v: number | null | undefined) =>
+    v === null || v === undefined ? "" : String(v);
   const lines = [header];
   for (const r of rows) {
-    lines.push([
-      day,
-      r.timestamp,
-      r.product,
-      fmt(r.bidPrice1), fmt(r.bidVolume1),
-      fmt(r.bidPrice2), fmt(r.bidVolume2),
-      fmt(r.bidPrice3), fmt(r.bidVolume3),
-      fmt(r.askPrice1), fmt(r.askVolume1),
-      fmt(r.askPrice2), fmt(r.askVolume2),
-      fmt(r.askPrice3), fmt(r.askVolume3),
-      r.midPrice === null ? "" : r.midPrice.toFixed(1),
-      r.pnl.toFixed(1),
-    ].join(";"));
+    lines.push(
+      [
+        r.day ?? day,
+        r.timestamp,
+        r.product,
+        fmt(r.bidPrice1),
+        fmt(r.bidVolume1),
+        fmt(r.bidPrice2),
+        fmt(r.bidVolume2),
+        fmt(r.bidPrice3),
+        fmt(r.bidVolume3),
+        fmt(r.askPrice1),
+        fmt(r.askVolume1),
+        fmt(r.askPrice2),
+        fmt(r.askVolume2),
+        fmt(r.askPrice3),
+        fmt(r.askVolume3),
+        r.midPrice === null ? "" : r.midPrice.toFixed(1),
+        r.pnl.toFixed(1),
+      ].join(";")
+    );
   }
   return lines.join("\n");
 }
@@ -257,15 +387,17 @@ export function tradesToCSV(trades: Trade[]): string {
   const header = "timestamp;buyer;seller;symbol;currency;price;quantity";
   const lines = [header];
   for (const t of trades) {
-    lines.push([
-      t.timestamp,
-      t.buyer,
-      t.seller,
-      t.symbol,
-      t.currency,
-      t.price.toFixed(1),
-      t.quantity,
-    ].join(";"));
+    lines.push(
+      [
+        t.timestamp,
+        t.buyer,
+        t.seller,
+        t.symbol,
+        t.currency,
+        t.price.toFixed(1),
+        t.quantity,
+      ].join(";")
+    );
   }
   return lines.join("\n");
 }
