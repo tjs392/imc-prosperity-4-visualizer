@@ -116,6 +116,7 @@ export default function HistoricalView({ active }: Props) {
   const [qtyMin, setQtyMin] = useState<number>(0);
   const [qtyMax, setQtyMax] = useState<number | null>(null);
   const [zoomRange, setZoomRange] = useState<{ min: number; max: number } | null>(null);
+  const [historyDays, setHistoryDays] = useState<number | null>(null);
 
   useEffect(() => {
     try {
@@ -168,7 +169,14 @@ export default function HistoricalView({ active }: Props) {
       .then(([histList, simList]: [number[], number[]]) => {
         const histSet = new Set(histList);
         const simOnly = simList.filter((d) => !histSet.has(d));
-        const combined = [...histList, ...simOnly].sort((a, b) => a - b);
+        // When in simulated mode with a historyDays limit, only include
+        // the last N historical days before the first sim day.
+        let filteredHist = histList;
+        if (source === "simulated" && historyDays !== null && historyDays >= 0) {
+          const sorted = [...histList].sort((a, b) => a - b);
+          filteredHist = sorted.slice(-historyDays);
+        }
+        const combined = [...filteredHist, ...simOnly].sort((a, b) => a - b);
         setDays(combined);
         setSimDays(simOnly);
         if (combined.length > 0) {
@@ -176,7 +184,7 @@ export default function HistoricalView({ active }: Props) {
         }
       })
       .catch((err) => console.error("days list failed:", err));
-  }, [selectedRound, source]);
+  }, [selectedRound, source, historyDays]);
 
   useEffect(() => {
     if (refreshSignal === 0) return;
@@ -201,7 +209,12 @@ export default function HistoricalView({ active }: Props) {
           .then((histList: number[]) => {
             const histSet = new Set(histList);
             const simOnly = simList.filter((d) => !histSet.has(d));
-            const combined = [...histList, ...simOnly].sort((a, b) => a - b);
+            let filteredHist = histList;
+            if (historyDays !== null && historyDays >= 0) {
+              const sorted = [...histList].sort((a, b) => a - b);
+              filteredHist = sorted.slice(-historyDays);
+            }
+            const combined = [...filteredHist, ...simOnly].sort((a, b) => a - b);
             setDays(combined);
             setSimDays(simOnly);
             setLoadedData(null);
@@ -209,7 +222,7 @@ export default function HistoricalView({ active }: Props) {
           });
       })
       .catch((err) => console.error("refresh failed:", err));
-  }, [refreshSignal, selectedRound, source]);
+  }, [refreshSignal, selectedRound, source, historyDays]);
 
   const fetchSingleDay = async (day: number): Promise<HistoricalDay> => {
     const cached = dayCache.get(day);
@@ -537,6 +550,28 @@ export default function HistoricalView({ active }: Props) {
                 Simulated
               </button>
             </div>
+            {source === "simulated" && (
+              <div className="flex items-center gap-1">
+                <span className="text-neutral-500 text-[10px]">History</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={historyDays === null ? "" : historyDays}
+                  placeholder="all"
+                  onChange={(e) => {
+                    if (e.target.value === "") {
+                      setHistoryDays(null);
+                      return;
+                    }
+                    const v = Number(e.target.value);
+                    if (Number.isFinite(v) && v >= 0) setHistoryDays(Math.floor(v));
+                  }}
+                  className="w-12 border border-neutral-600 bg-[#2a2d31] text-neutral-200 px-1.5 py-1 text-[11px] font-mono text-right focus:border-neutral-300 focus:outline-none placeholder-neutral-600"
+                  title="Number of historical days to include before sim days. Leave empty for all."
+                />
+                <span className="text-neutral-600 text-[10px]">days</span>
+              </div>
+            )}
             <span className="text-neutral-400 text-xs">Round</span>
             <select
               value={selectedRound ?? ""}

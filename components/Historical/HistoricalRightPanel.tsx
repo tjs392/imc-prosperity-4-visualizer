@@ -1919,10 +1919,10 @@ function GeneratorSection({
           <div className="text-[9px] text-neutral-500 font-mono">
             starts at ts {selSeg.startTs.toLocaleString()}
           </div>
-          <SliderRow label="Slope ×" min={-3} max={3} step={0.05} value={selSeg.slopeMultiplier}
-            format={(v) => `${v.toFixed(2)}×`}
+          <SliderRow label="Slope ×" min={-10} max={10} step={0.1} value={selSeg.slopeMultiplier}
+            format={(v) => `${v.toFixed(1)}×`}
             onChange={(v) => updateSegment(sel.product, sel.day, sel.index, { slopeMultiplier: v })}
-            hints={[{ value: 0, label: "flat" }, { value: 1, label: "normal" }, { value: -1, label: "reverse" }]}
+            hints={[{ value: 0, label: "flat" }, { value: 1, label: "normal" }, { value: -1, label: "reverse" }, { value: 5, label: "5×" }, { value: -5, label: "-5×" }]}
           />
           <SliderRow label="Noise ×" min={0} max={5} step={0.1} value={selSeg.noiseMultiplier}
             format={(v) => `${v.toFixed(1)}×`}
