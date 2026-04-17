@@ -239,8 +239,8 @@ export function OrderDepthTable({
       ]}
       empty={!hasData}
     >
-      {asks.map((a) => (
-        <tr key={`ask-${a.price}`} className="text-neutral-200">
+      {asks.map((a, i) => (
+        <tr key={`ask-${i}-${a.price}`} className="text-neutral-200">
           <td className="border-b border-neutral-800 px-2 py-1"></td>
           <td className="border-b border-neutral-800 px-2 py-1 text-center font-mono">
             {a.price}
@@ -262,8 +262,8 @@ export function OrderDepthTable({
           <td className="border-b border-neutral-800 px-2 py-1"></td>
         </tr>
       )}
-      {bids.map((b) => (
-        <tr key={`bid-${b.price}`} className="text-neutral-200">
+      {bids.map((b, i) => (
+        <tr key={`bid-${i}-${b.price}`} className="text-neutral-200">
           <td
             className="border-b border-neutral-800 px-2 py-1 text-right font-mono"
             style={{ backgroundColor: BID_TINT }}

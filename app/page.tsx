@@ -208,7 +208,7 @@ export default function Home() {
             >
               Dashboard
             </button>
-            <button
+            {/* <button
               onClick={() => setTab("logs")}
               className={`border px-2 py-1 text-xs transition-colors ${
                 tab === "logs"
@@ -217,7 +217,7 @@ export default function Home() {
               }`}
             >
               Logs
-            </button>
+            </button> */}
             <button
               onClick={() => setTab("historical")}
               className={`border px-2 py-1 text-xs transition-colors ${
