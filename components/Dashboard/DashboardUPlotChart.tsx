@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot, { AlignedData, Options, Series } from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { ActivityRow, Trade, SandboxEntry } from "@/lib/types";
@@ -42,6 +42,7 @@ type Props = {
   resetSignal?: number;
   onResetRequest?: () => void;
   onHoverTime?: (time: number | null) => void;
+  onXRangeChange?: (range: { min: number; max: number } | null) => void;
 };
 
 const BID_COLORS = {
@@ -387,6 +388,7 @@ export default function DashboardUPlotChart({
   resetSignal = 0,
   onResetRequest,
   onHoverTime,
+  onXRangeChange,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
@@ -407,10 +409,18 @@ export default function DashboardUPlotChart({
   visibleOrdersRef.current = visibleOrders;
   const onHoverTimeRef = useRef(onHoverTime);
   onHoverTimeRef.current = onHoverTime;
+  const onXRangeChangeRef = useRef(onXRangeChange);
+  onXRangeChangeRef.current = onXRangeChange;
   const normalizerRef = useRef(normalizer);
   normalizerRef.current = normalizer;
   const qtyFilterRef = useRef<QtyFilter | undefined>(qtyFilter);
   qtyFilterRef.current = qtyFilter;
+
+  // Freeze state: when true, the setCursor hook no-ops so the tooltip and
+  // hover emission stay pinned wherever they were when the user hit F.
+  const [frozen, setFrozen] = useState(false);
+  const frozenRef = useRef(frozen);
+  frozenRef.current = frozen;
 
   const book = useMemo(() => dedupeRows(rows), [rows]);
 
@@ -619,6 +629,20 @@ export default function DashboardUPlotChart({
         },
       ],
       hooks: {
+        setScale: [
+          (u, key) => {
+            if (key !== "x") return;
+            const cb = onXRangeChangeRef.current;
+            if (!cb) return;
+            const min = u.scales.x.min;
+            const max = u.scales.x.max;
+            if (min === undefined || max === undefined || min === null || max === null) {
+              cb(null);
+              return;
+            }
+            cb({ min, max });
+          },
+        ],
         draw: [
           (u) => {
             const ctx = u.ctx;
@@ -749,6 +773,9 @@ export default function DashboardUPlotChart({
         ],
         setCursor: [
           (u) => {
+            // When frozen, ignore all cursor updates (including synced ones)
+            // so the tooltip stays pinned where the user froze it.
+            if (frozenRef.current) return;
             const tt = tooltipRef.current;
             const container = containerRef.current;
 
@@ -984,12 +1011,43 @@ export default function DashboardUPlotChart({
     plotRef.current = plot;
     registerScaleSync(plot, syncKey);
 
+    const localContainer = containerRef.current;
+    let pointerInside = false;
+    const enterHandler = () => {
+      pointerInside = true;
+    };
     const leaveHandler = () => {
+      pointerInside = false;
+      if (frozenRef.current) return;
       if (tooltipRef.current) tooltipRef.current.style.display = "none";
       onHoverTimeRef.current?.(null);
     };
-    containerRef.current.addEventListener("mouseleave", leaveHandler);
-    const localContainer = containerRef.current;
+    const keyHandler = (e: KeyboardEvent) => {
+      if (!pointerInside) return;
+      // Don't hijack F when the user is typing in a form control.
+      const target = e.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (
+          tag === "INPUT" ||
+          tag === "TEXTAREA" ||
+          tag === "SELECT" ||
+          target.isContentEditable
+        ) {
+          return;
+        }
+      }
+      if (e.key === "f" || e.key === "F") {
+        e.preventDefault();
+        setFrozen((v) => !v);
+      } else if (e.key === "Escape" && frozenRef.current) {
+        e.preventDefault();
+        setFrozen(false);
+      }
+    };
+    localContainer.addEventListener("mouseenter", enterHandler);
+    localContainer.addEventListener("mouseleave", leaveHandler);
+    window.addEventListener("keydown", keyHandler);
 
     let pendingSize: { width: number; height: number } | null = null;
     let sizeRaf = 0;
@@ -1018,7 +1076,9 @@ export default function DashboardUPlotChart({
         cancelAnimationFrame(sizeRaf);
         sizeRaf = 0;
       }
+      localContainer.removeEventListener("mouseenter", enterHandler);
       localContainer.removeEventListener("mouseleave", leaveHandler);
+      window.removeEventListener("keydown", keyHandler);
       unregisterScaleSync(plot);
       plot.destroy();
       plotRef.current = null;
@@ -1063,16 +1123,36 @@ export default function DashboardUPlotChart({
   return (
     <div className="border border-neutral-600 bg-[#2a2d31] relative flex flex-col min-w-0 flex-none overflow-hidden">
       <div className="flex items-center justify-between border-b border-neutral-600 px-3 py-1.5 flex-none">
-        <span className="text-neutral-100 text-xs font-semibold">{label}</span>
-        <button
-          onClick={() => {
-            resetUPlotX(plotRef.current);
-            onResetRequest?.();
-          }}
-          className="text-[11px] text-neutral-400 hover:text-neutral-100 border border-neutral-600 px-1.5 py-0.5"
-        >
-          Reset
-        </button>
+        <div className="flex items-center gap-2">
+          <span className="text-neutral-100 text-xs font-semibold">{label}</span>
+          {frozen && (
+            <span className="text-[10px] font-mono uppercase tracking-wider px-1.5 py-0.5 border border-amber-500/60 text-amber-400 bg-amber-950/30">
+              frozen
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => setFrozen((v) => !v)}
+            title="Press F while hovering the chart to toggle freeze"
+            className={`text-[11px] border px-1.5 py-0.5 transition-colors ${
+              frozen
+                ? "border-amber-500/60 bg-amber-950/40 text-amber-300 hover:text-amber-100"
+                : "border-neutral-600 text-neutral-400 hover:text-neutral-100"
+            }`}
+          >
+            {frozen ? "Unfreeze (F)" : "Freeze (F)"}
+          </button>
+          <button
+            onClick={() => {
+              resetUPlotX(plotRef.current);
+              onResetRequest?.();
+            }}
+            className="text-[11px] text-neutral-400 hover:text-neutral-100 border border-neutral-600 px-1.5 py-0.5"
+          >
+            Reset
+          </button>
+        </div>
       </div>
       <div
         ref={containerRef}

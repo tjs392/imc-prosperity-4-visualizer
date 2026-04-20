@@ -7,28 +7,13 @@ import {
   MergedHistorical,
 } from "@/lib/parseHistorical";
 import { HistoricalDay, ActivityRow, Trade } from "@/lib/types";
-import {
-  computeSpread,
-  computeRollingVolatility,
-  computeRollingZScore,
-  computeGlobalZScore,
-  computeDetrendedZScore,
-  computePairSpread,
-  computeProductMetrics,
-  computePairMetrics,
-  ProductMetrics,
-  PairMetrics,
-} from "@/lib/historicalMetrics";
-import HistoricalLineChart from "@/components/Historical/HistoricalLineChart";
-import HistoricalVolumeChart from "@/components/Historical/HistoricalVolumeChart";
 import HistoricalPriceChart from "@/components/Historical/HistoricalPriceChart";
-import HistoricalZScoreChart from "@/components/Historical/HistoricalZScoreChart";
-import HistoricalPairSpreadChart from "@/components/Historical/HistoricalPairSpreadChart";
-import HistoricalMetricsStrip from "@/components/Historical/HistoricalMetricsStrip";
+import HistoricalLineChart from "@/components/Historical/HistoricalLineChart";
+import HistoricalOptionsChart, { OptionsSeries } from "@/components/Historical/HistoricalOptionsChart";
+import HistoricalBasketSignalChart, { SignalMarker } from "@/components/Historical/HistoricalBasketSignalChart";
 import MultiSelectDropdown from "@/components/MultiSelectDropdown";
 import HistoricalRightPanel from "@/components/Historical/HistoricalRightPanel";
 
-const ROLLING_WINDOW = 100;
 const ALL_KEY = "__all__";
 
 // Shared cursor + x-scale sync key for every time-axis chart on this page.
@@ -37,43 +22,19 @@ const HISTORICAL_SYNC_KEY = "historical";
 
 type DaySelection = number | typeof ALL_KEY;
 
-type ChartId =
-  | "price"
-  | "volume"
-  | "spread"
-  | "volatility"
-  | "zscore"
-  | "pairSpread";
+type ChartId = "price" | "basket" | "options";
 
 const CHART_LABELS: Record<ChartId, string> = {
   price: "Price",
-  volume: "Volume",
-  spread: "Bid-Ask Spread",
-  volatility: "Volatility",
-  zscore: "Z-Scores",
-  pairSpread: "Pair Spread",
+  basket: "ETF Basket",
+  options: "Options",
 };
 
-const ALL_CHARTS: ChartId[] = [
-  "price",
-  "volume",
-  "spread",
-  "volatility",
-  "zscore",
-  "pairSpread",
-];
+const ALL_CHARTS: ChartId[] = ["price", "basket", "options"];
 
-const SINGLE_CHART_IDS: ChartId[] = [
-  "price",
-  "volume",
-  "spread",
-  "volatility",
-  "zscore",
-];
+const SINGLE_CHART_IDS: ChartId[] = ["price"];
 
-const PAIR_CHART_IDS: ChartId[] = ["pairSpread"];
-
-const PAIR_CHARTS: Set<ChartId> = new Set(PAIR_CHART_IDS);
+const GLOBAL_CHART_IDS: ChartId[] = ["basket", "options"];
 
 const DEFAULT_ENABLED: ChartId[] = ["price"];
 
@@ -92,6 +53,7 @@ type LoadedData = {
 };
 
 export default function HistoricalView({ active }: Props) {
+  const [prosperity, setProsperity] = useState<"p3" | "p4">("p4");
   const [rounds, setRounds] = useState<number[]>([]);
   const [selectedRound, setSelectedRound] = useState<number | null>(null);
   const [days, setDays] = useState<number[]>([]);
@@ -118,6 +80,8 @@ export default function HistoricalView({ active }: Props) {
   const [zoomRange, setZoomRange] = useState<{ min: number; max: number } | null>(null);
   const [historyDays, setHistoryDays] = useState<number | null>(null);
   const [totalHistDays, setTotalHistDays] = useState(0);
+  const [basketWindow, setBasketWindow] = useState(200);
+  const [basketThreshold, setBasketThreshold] = useState(50);
 
   useEffect(() => {
     try {
@@ -143,14 +107,24 @@ export default function HistoricalView({ active }: Props) {
   }, [enabledCharts]);
 
   useEffect(() => {
-    fetch("/api/historical")
+    setDayCache(new Map());
+    setMergedCache(null);
+    setLoadedData(null);
+    setSelectedDay(null);
+    setSelectedRound(null);
+    setDays([]);
+    setSimDays([]);
+    setSelectedProducts([]);
+    setZoomRange(null);
+
+    fetch(`/api/historical?prosperity=${prosperity}`)
       .then((r) => r.json())
       .then((j: { rounds: number[] }) => {
         setRounds(j.rounds);
         if (j.rounds.length > 0) setSelectedRound(j.rounds[0]);
       })
       .catch((err) => console.error("rounds list failed:", err));
-  }, []);
+  }, [prosperity]);
 
   useEffect(() => {
     if (selectedRound === null) return;
@@ -160,10 +134,10 @@ export default function HistoricalView({ active }: Props) {
     setSelectedDay(null);
     setSimDays([]);
 
-    const histReq = fetch(`/api/historical?round=${selectedRound}`).then((r) => r.json());
+    const histReq = fetch(`/api/historical?round=${selectedRound}&prosperity=${prosperity}`).then((r) => r.json());
     const simReq =
       source === "simulated"
-        ? fetch(`/api/historical?round=${selectedRound}&source=simulated`).then((r) => r.json())
+        ? fetch(`/api/historical?round=${selectedRound}&source=simulated&prosperity=${prosperity}`).then((r) => r.json())
         : Promise.resolve([] as number[]);
 
     Promise.all([histReq, simReq])
@@ -186,7 +160,7 @@ export default function HistoricalView({ active }: Props) {
         }
       })
       .catch((err) => console.error("days list failed:", err));
-  }, [selectedRound, source, historyDays]);
+  }, [selectedRound, source, historyDays, prosperity]);
 
   useEffect(() => {
     if (refreshSignal === 0) return;
@@ -196,7 +170,7 @@ export default function HistoricalView({ active }: Props) {
       return;
     }
 
-    fetch(`/api/historical?round=${selectedRound}&source=simulated`)
+    fetch(`/api/historical?round=${selectedRound}&source=simulated&prosperity=${prosperity}`)
       .then((r) => r.json())
       .then((simList: number[]) => {
         setDayCache((prev) => {
@@ -206,7 +180,7 @@ export default function HistoricalView({ active }: Props) {
         });
         setMergedCache(null);
 
-        return fetch(`/api/historical?round=${selectedRound}`)
+        return fetch(`/api/historical?round=${selectedRound}&prosperity=${prosperity}`)
           .then((r) => r.json())
           .then((histList: number[]) => {
             const histSet = new Set(histList);
@@ -224,7 +198,7 @@ export default function HistoricalView({ active }: Props) {
           });
       })
       .catch((err) => console.error("refresh failed:", err));
-  }, [refreshSignal, selectedRound, source, historyDays]);
+  }, [refreshSignal, selectedRound, source, historyDays, prosperity]);
 
   const fetchSingleDay = async (day: number): Promise<HistoricalDay> => {
     const cached = dayCache.get(day);
@@ -233,7 +207,7 @@ export default function HistoricalView({ active }: Props) {
     const isSim = simDays.includes(day);
     const baseDir = isSim
       ? `/simulation/round${round}/generated`
-      : `/historical/round${round}`;
+      : `/historical/${prosperity}/round${round}`;
     const pricesUrl = `${baseDir}/prices_round_${round}_day_${day}.csv`;
     const tradesUrl = `${baseDir}/trades_round_${round}_day_${day}.csv`;
     const [pricesRaw, tradesRaw] = await Promise.all([
@@ -389,94 +363,223 @@ export default function HistoricalView({ active }: Props) {
     }));
   }, [loadedData]);
 
-  const productMetrics = useMemo<ProductMetrics[]>(() => {
-    return selectedProducts.map((p) =>
-      computeProductMetrics(p, rowsByProduct.get(p) ?? [])
-    );
-  }, [selectedProducts, rowsByProduct]);
-
-  const pairMetrics = useMemo<PairMetrics | null>(() => {
-    if (selectedProducts.length < 2) return null;
-    const [a, b] = selectedProducts;
-    return computePairMetrics(
-      a,
-      b,
-      rowsByProduct.get(a) ?? [],
-      rowsByProduct.get(b) ?? []
-    );
-  }, [selectedProducts, rowsByProduct]);
-
-  const pairSpreadData = useMemo(() => {
-    if (selectedProducts.length < 2) return null;
-    const [a, b] = selectedProducts;
-    return computePairSpread(
-      rowsByProduct.get(a) ?? [],
-      rowsByProduct.get(b) ?? []
-    );
-  }, [selectedProducts, rowsByProduct]);
-
-  const hasPair = selectedProducts.length >= 2;
   const primaryProduct = selectedProducts[0] ?? null;
   const primaryRows = primaryProduct
     ? rowsByProduct.get(primaryProduct) ?? []
     : [];
 
-  const spreadByProduct = useMemo(() => {
-    const m = new Map<string, ReturnType<typeof computeSpread>>();
-    for (const p of selectedProducts) {
-      m.set(p, computeSpread(rowsByProduct.get(p) ?? []));
+  const basketData = useMemo(() => {
+    if (!loadedData) return null;
+    const byProdTs = new Map<string, Map<number, number>>();
+    const needed = ["CROISSANTS", "JAMS", "DJEMBES", "PICNIC_BASKET1", "PICNIC_BASKET2"];
+    for (const p of needed) byProdTs.set(p, new Map());
+    for (const r of loadedData.activities) {
+      const m = byProdTs.get(r.product);
+      if (!m) continue;
+      if (r.midPrice === null) continue;
+      if (r.bidPrice1 === null || r.askPrice1 === null) continue;
+      m.set(r.timestamp, r.midPrice);
     }
-    return m;
-  }, [selectedProducts, rowsByProduct]);
+    const croissants = byProdTs.get("CROISSANTS")!;
+    const jams = byProdTs.get("JAMS")!;
+    const djembes = byProdTs.get("DJEMBES")!;
+    const pb1 = byProdTs.get("PICNIC_BASKET1")!;
+    const pb2 = byProdTs.get("PICNIC_BASKET2")!;
 
-  const volByProduct = useMemo(() => {
-    const m = new Map<string, ReturnType<typeof computeRollingVolatility>>();
-    for (const p of selectedProducts) {
-      m.set(
-        p,
-        computeRollingVolatility(rowsByProduct.get(p) ?? [], ROLLING_WINDOW)
-      );
-    }
-    return m;
-  }, [selectedProducts, rowsByProduct]);
+    const hasComponents = croissants.size > 0 && jams.size > 0;
+    const hasPB1 = pb1.size > 0 && djembes.size > 0;
+    const hasPB2 = pb2.size > 0;
 
-  const rollingZByProduct = useMemo(() => {
-    const m = new Map<string, ReturnType<typeof computeRollingZScore>>();
-    for (const p of selectedProducts) {
-      m.set(
-        p,
-        computeRollingZScore(rowsByProduct.get(p) ?? [], ROLLING_WINDOW)
-      );
-    }
-    return m;
-  }, [selectedProducts, rowsByProduct]);
+    if (!hasComponents || (!hasPB1 && !hasPB2)) return null;
 
-  const globalZByProduct = useMemo(() => {
-    const m = new Map<string, ReturnType<typeof computeGlobalZScore>>();
-    for (const p of selectedProducts) {
-      m.set(p, computeGlobalZScore(rowsByProduct.get(p) ?? []));
+    const pb1Mid: { time: number; value: number }[] = [];
+    const pb1Syn: { time: number; value: number }[] = [];
+    const pb1Spread: { time: number; value: number }[] = [];
+    if (hasPB1) {
+      for (const [t, basket] of pb1) {
+        const c = croissants.get(t);
+        const j = jams.get(t);
+        const d = djembes.get(t);
+        if (c === undefined || j === undefined || d === undefined) continue;
+        const syn = 6 * c + 3 * j + d;
+        pb1Mid.push({ time: t, value: basket });
+        pb1Syn.push({ time: t, value: syn });
+        pb1Spread.push({ time: t, value: basket - syn });
+      }
+      pb1Mid.sort((a, b) => a.time - b.time);
+      pb1Syn.sort((a, b) => a.time - b.time);
+      pb1Spread.sort((a, b) => a.time - b.time);
     }
-    return m;
-  }, [selectedProducts, rowsByProduct]);
 
-  const detrendedZByProduct = useMemo(() => {
-    const m = new Map<string, ReturnType<typeof computeDetrendedZScore>>();
-    for (const p of selectedProducts) {
-      m.set(p, computeDetrendedZScore(rowsByProduct.get(p) ?? []));
+    const pb2Mid: { time: number; value: number }[] = [];
+    const pb2Syn: { time: number; value: number }[] = [];
+    const pb2Spread: { time: number; value: number }[] = [];
+    if (hasPB2) {
+      for (const [t, basket] of pb2) {
+        const c = croissants.get(t);
+        const j = jams.get(t);
+        if (c === undefined || j === undefined) continue;
+        const syn = 4 * c + 2 * j;
+        pb2Mid.push({ time: t, value: basket });
+        pb2Syn.push({ time: t, value: syn });
+        pb2Spread.push({ time: t, value: basket - syn });
+      }
+      pb2Mid.sort((a, b) => a.time - b.time);
+      pb2Syn.sort((a, b) => a.time - b.time);
+      pb2Spread.sort((a, b) => a.time - b.time);
     }
-    return m;
-  }, [selectedProducts, rowsByProduct]);
+
+    return {
+      pb1: hasPB1 ? { mid: pb1Mid, syn: pb1Syn, spread: pb1Spread } : null,
+      pb2: hasPB2 ? { mid: pb2Mid, syn: pb2Syn, spread: pb2Spread } : null,
+    };
+  }, [loadedData]);
+
+  const basketSignals = useMemo(() => {
+    if (!basketData) return null;
+    const w = Math.max(2, Math.floor(basketWindow));
+    const alpha = 2 / (w + 1);
+    const t = Math.max(0, basketThreshold);
+
+    const analyzeOne = (spread: { time: number; value: number }[]) => {
+      if (spread.length === 0) {
+        return {
+          premium: [] as { time: number; value: number }[],
+          signal: [] as { time: number; value: number }[],
+          markers: [] as SignalMarker[],
+          stats: { entries: 0, pnl: 0, avgHold: null as number | null, wins: 0, losses: 0 },
+        };
+      }
+      const premium: { time: number; value: number }[] = [];
+      const signal: { time: number; value: number }[] = [];
+      let ema = spread[0].value;
+      for (let i = 0; i < spread.length; i++) {
+        const s = spread[i];
+        if (i === 0) {
+          ema = s.value;
+        } else {
+          ema = alpha * s.value + (1 - alpha) * ema;
+        }
+        premium.push({ time: s.time, value: ema });
+        signal.push({ time: s.time, value: s.value - ema });
+      }
+
+      const markers: SignalMarker[] = [];
+      type Pos = { dir: 1 | -1; entryTime: number; entrySpread: number; entryPremium: number };
+      let pos: Pos | null = null;
+      let totalPnl = 0;
+      let totalHold = 0;
+      let entries = 0;
+      let wins = 0;
+      let losses = 0;
+
+      for (let i = 0; i < spread.length; i++) {
+        const s = spread[i];
+        const prem = premium[i].value;
+        const sig = signal[i].value;
+
+        if (pos === null) {
+          if (sig < -t) {
+            pos = { dir: 1, entryTime: s.time, entrySpread: s.value, entryPremium: prem };
+            markers.push({ time: s.time, kind: "entryLong" });
+            entries++;
+          } else if (sig > t) {
+            pos = { dir: -1, entryTime: s.time, entrySpread: s.value, entryPremium: prem };
+            markers.push({ time: s.time, kind: "entryShort" });
+            entries++;
+          }
+        } else {
+          const crossedZero =
+            (pos.dir === 1 && sig >= 0) || (pos.dir === -1 && sig <= 0);
+          if (crossedZero) {
+            const pnl = pos.dir === 1 ? s.value - pos.entrySpread : pos.entrySpread - s.value;
+            totalPnl += pnl;
+            totalHold += s.time - pos.entryTime;
+            if (pnl > 0) wins++;
+            else if (pnl < 0) losses++;
+            markers.push({ time: s.time, kind: "exit" });
+            pos = null;
+          }
+        }
+      }
+
+      const closed = wins + losses;
+      const avgHold = closed > 0 ? totalHold / closed : null;
+
+      return {
+        premium,
+        signal,
+        markers,
+        stats: { entries, pnl: totalPnl, avgHold, wins, losses },
+      };
+    };
+
+    return {
+      pb1: basketData.pb1 ? analyzeOne(basketData.pb1.spread) : null,
+      pb2: basketData.pb2 ? analyzeOne(basketData.pb2.spread) : null,
+    };
+  }, [basketData, basketWindow, basketThreshold]);
+
+  const optionsData = useMemo(() => {
+    if (!loadedData) return null;
+    const voucherRe = /^VOLCANIC_ROCK_VOUCHER_(\d+)$/;
+    const strikes = new Map<string, number>();
+    for (const p of loadedData.products) {
+      const m = p.match(voucherRe);
+      if (m) strikes.set(p, Number(m[1]));
+    }
+    if (strikes.size === 0) return null;
+    const hasUnderlying = loadedData.products.includes("VOLCANIC_ROCK");
+    const byProd = new Map<string, { time: number; value: number }[]>();
+    for (const name of strikes.keys()) byProd.set(name, []);
+    if (hasUnderlying) byProd.set("VOLCANIC_ROCK", []);
+    for (const r of loadedData.activities) {
+      const arr = byProd.get(r.product);
+      if (!arr) continue;
+      if (r.midPrice === null) continue;
+      if (r.bidPrice1 === null || r.askPrice1 === null) continue;
+      arr.push({ time: r.timestamp, value: r.midPrice });
+    }
+    for (const arr of byProd.values()) arr.sort((a, b) => a.time - b.time);
+
+    const voucherColors = ["#60a5fa", "#22d3ee", "#a3e635", "#f59e0b", "#f87171"];
+    const sortedStrikes = Array.from(strikes.entries()).sort((a, b) => a[1] - b[1]);
+    const voucherSeries: OptionsSeries[] = sortedStrikes.map(([name, strike], i) => ({
+      label: `V${strike}`,
+      color: voucherColors[i % voucherColors.length],
+      data: byProd.get(name) ?? [],
+    }));
+
+    const moneynessSeries: OptionsSeries[] = [];
+    if (hasUnderlying) {
+      const underMap = new Map<number, number>();
+      for (const d of byProd.get("VOLCANIC_ROCK") ?? []) underMap.set(d.time, d.value);
+      sortedStrikes.forEach(([, strike], i) => {
+        const data: { time: number; value: number }[] = [];
+        for (const [t, u] of underMap) data.push({ time: t, value: u - strike });
+        data.sort((a, b) => a.time - b.time);
+        moneynessSeries.push({
+          label: `S-${strike}`,
+          color: voucherColors[i % voucherColors.length],
+          data,
+        });
+      });
+    }
+
+    return { voucherSeries, moneynessSeries, hasUnderlying };
+  }, [loadedData]);
 
   const isChartAvailable = (id: ChartId): boolean => {
-    if (PAIR_CHARTS.has(id)) return hasPair;
+    if (id === "basket") return basketData !== null;
+    if (id === "options") return optionsData !== null;
     return true;
   };
 
   const visibleSingleCharts = enabledCharts.filter(
     (id) => SINGLE_CHART_IDS.includes(id) && isChartAvailable(id)
   );
-  const visiblePairCharts = enabledCharts.filter(
-    (id) => PAIR_CHART_IDS.includes(id) && isChartAvailable(id)
+  const visibleGlobalCharts = enabledCharts.filter(
+    (id) => GLOBAL_CHART_IDS.includes(id) && isChartAvailable(id)
   );
 
   const displayLabel =
@@ -529,6 +632,29 @@ export default function HistoricalView({ active }: Props) {
             >
               Tools
             </button>
+            <span className="text-neutral-400 text-xs">Prosperity</span>
+            <div className="flex">
+              <button
+                onClick={() => setProsperity("p3")}
+                className={`border px-2 py-1 text-[11px] ${
+                  prosperity === "p3"
+                    ? "border-neutral-300 bg-neutral-700 text-neutral-100"
+                    : "border-neutral-600 bg-[#2a2d31] text-neutral-300 hover:text-neutral-100"
+                }`}
+              >
+                P3
+              </button>
+              <button
+                onClick={() => setProsperity("p4")}
+                className={`border-t border-r border-b px-2 py-1 text-[11px] ${
+                  prosperity === "p4"
+                    ? "border-neutral-300 bg-neutral-700 text-neutral-100"
+                    : "border-neutral-600 bg-[#2a2d31] text-neutral-300 hover:text-neutral-100"
+                }`}
+              >
+                P4
+              </button>
+            </div>
             <span className="text-neutral-400 text-xs">Source</span>
             <div className="flex">
               <button
@@ -639,12 +765,12 @@ export default function HistoricalView({ active }: Props) {
         )}
         {!loadedData && !loading && rounds.length === 0 && (
           <p className="text-neutral-500 text-xs">
-            No historical data found. Place files in public/historical/round1/, public/historical/round2/, etc.
+            No historical data found. Place files in public/historical/{prosperity}/round1/, public/historical/{prosperity}/round2/, etc.
           </p>
         )}
         {!loadedData && !loading && rounds.length > 0 && days.length === 0 && (
           <p className="text-neutral-500 text-xs">
-            No CSV files found in public/historical/round{selectedRound}/.
+            No CSV files found in public/historical/{prosperity}/round{selectedRound}/.
           </p>
         )}
 
@@ -657,10 +783,6 @@ export default function HistoricalView({ active }: Props) {
             }
           >
             <div className="min-w-0">
-              <HistoricalMetricsStrip
-              productMetrics={productMetrics}
-              pairMetrics={pairMetrics}
-            />
 
             <div className="flex items-center gap-2 flex-wrap mb-3 pb-2 border-b border-neutral-700">
               <span className="text-neutral-400 text-xs">Single</span>
@@ -680,11 +802,12 @@ export default function HistoricalView({ active }: Props) {
                   </button>
                 );
               })}
-              {hasPair && (
+              {GLOBAL_CHART_IDS.some((id) => isChartAvailable(id)) && (
                 <>
                   <span className="text-neutral-600 mx-1">|</span>
-                  <span className="text-neutral-400 text-xs">Pair</span>
-                  {PAIR_CHART_IDS.map((id) => {
+                  <span className="text-neutral-400 text-xs">Global</span>
+                  {GLOBAL_CHART_IDS.map((id) => {
+                    if (!isChartAvailable(id)) return null;
                     const isOn = enabledCharts.includes(id);
                     return (
                       <button
@@ -734,93 +857,147 @@ export default function HistoricalView({ active }: Props) {
                       />
                     );
                   }
-                  if (id === "volume") {
-                    return (
-                      <HistoricalVolumeChart
-                        key={`${id}-${p}`}
-                        rows={rows}
-                        label={`Volume · ${p}`}
-                        height={260}
-                        xPlotLines={xPlotLines}
-                        syncKey={HISTORICAL_SYNC_KEY}
-                        resetSignal={resetSignal}
-                      />
-                    );
-                  }
-                  if (id === "spread") {
-                    return (
-                      <HistoricalLineChart
-                        key={`${id}-${p}`}
-                        data={spreadByProduct.get(p) ?? []}
-                        label={`Bid-Ask Spread · ${p}`}
-                        color="#60a5fa"
-                        valueLabel="spread"
-                        height={260}
-                        xPlotLines={xPlotLines}
-                        syncKey={HISTORICAL_SYNC_KEY}
-                        resetSignal={resetSignal}
-                      />
-                    );
-                  }
-                  if (id === "volatility") {
-                    return (
-                      <HistoricalLineChart
-                        key={`${id}-${p}`}
-                        data={volByProduct.get(p) ?? []}
-                        label={`Volatility (${ROLLING_WINDOW * 100}ts) · ${p}`}
-                        color="#f97316"
-                        valueLabel="stdev"
-                        height={260}
-                        formatValue={(v) => v.toFixed(5)}
-                        xPlotLines={xPlotLines}
-                        syncKey={HISTORICAL_SYNC_KEY}
-                        resetSignal={resetSignal}
-                      />
-                    );
-                  }
-                  if (id === "zscore") {
-                    return (
-                      <HistoricalZScoreChart
-                        key={`${id}-${p}`}
-                        rolling={rollingZByProduct.get(p) ?? []}
-                        global={globalZByProduct.get(p) ?? []}
-                        detrended={detrendedZByProduct.get(p) ?? []}
-                        label={`Z-Scores (${ROLLING_WINDOW * 100}ts) · ${p}`}
-                        height={260}
-                        xPlotLines={xPlotLines}
-                        syncKey={HISTORICAL_SYNC_KEY}
-                        resetSignal={resetSignal}
-                      />
-                    );
-                  }
                   return null;
                 })
               )}
             </div>
 
-            {hasPair && visiblePairCharts.length > 0 && (
-              <div className="grid grid-cols-2 gap-3">
-                {visiblePairCharts.map((id) => {
-                  if (id === "pairSpread" && pairSpreadData) {
-                    const [a, b] = selectedProducts;
-                    return (
-                      <HistoricalPairSpreadChart
-                        key={id}
-                        series={pairSpreadData.series}
-                        mean={pairSpreadData.mean}
-                        stdev={pairSpreadData.stdev}
-                        label={`Pair Spread · ${a} - ${pairSpreadData.beta.toFixed(
-                          3
-                        )}·${b}`}
-                        height={260}
+            {visibleGlobalCharts.includes("basket") && basketData && basketSignals && (
+              <>
+                <div className="mt-3 mb-2 flex items-center gap-3 text-[10px] text-neutral-500 font-mono border border-neutral-700/60 bg-[#22252a] px-2.5 py-1.5 flex-wrap">
+                  <span className="text-neutral-300 font-semibold uppercase tracking-wider text-[9px]">
+                    Compositions
+                  </span>
+                  <span>
+                    <span className="text-neutral-300">PB1</span> = 6·CROISSANTS + 3·JAMS + 1·DJEMBE
+                  </span>
+                  <span className="text-neutral-700">|</span>
+                  <span>
+                    <span className="text-neutral-300">PB2</span> = 4·CROISSANTS + 2·JAMS
+                  </span>
+                  <span className="text-neutral-700">|</span>
+                  <span className="text-neutral-600">P3 weights</span>
+                  <span className="text-neutral-700 mx-1">||</span>
+                  <label className="flex items-center gap-1.5">
+                    <span className="text-neutral-400">EMA window</span>
+                    <input
+                      type="number"
+                      value={basketWindow}
+                      min={2}
+                      step={10}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        if (Number.isFinite(v) && v >= 2) setBasketWindow(v);
+                      }}
+                      className="w-16 border border-neutral-600 bg-[#1f2125] text-neutral-200 px-1.5 py-0.5 text-[10px] focus:border-neutral-300 focus:outline-none"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1.5">
+                    <span className="text-neutral-400">Threshold</span>
+                    <input
+                      type="number"
+                      value={basketThreshold}
+                      min={0}
+                      step={5}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        if (Number.isFinite(v) && v >= 0) setBasketThreshold(v);
+                      }}
+                      className="w-14 border border-neutral-600 bg-[#1f2125] text-neutral-200 px-1.5 py-0.5 text-[10px] focus:border-neutral-300 focus:outline-none"
+                    />
+                  </label>
+                </div>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                  {basketData.pb1 && (
+                    <HistoricalLineChart
+                      data={basketData.pb1.mid}
+                      data2={basketData.pb1.syn}
+                      label="PB1 · basket vs synthetic (6C+3J+1D)"
+                      color="#a3e635"
+                      color2="#22d3ee"
+                      valueLabel="basket"
+                      valueLabel2="synth"
+                      height={220}
+                      xPlotLines={xPlotLines}
+                      syncKey={HISTORICAL_SYNC_KEY}
+                      resetSignal={resetSignal}
+                    />
+                  )}
+                  {basketData.pb2 && (
+                    <HistoricalLineChart
+                      data={basketData.pb2.mid}
+                      data2={basketData.pb2.syn}
+                      label="PB2 · basket vs synthetic (4C+2J)"
+                      color="#a3e635"
+                      color2="#22d3ee"
+                      valueLabel="basket"
+                      valueLabel2="synth"
+                      height={220}
+                      xPlotLines={xPlotLines}
+                      syncKey={HISTORICAL_SYNC_KEY}
+                      resetSignal={resetSignal}
+                    />
+                  )}
+                </div>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-3">
+                  {basketData.pb1 && basketSignals.pb1 && (
+                    <div>
+                      <BasketStatsStrip label="PB1" stats={basketSignals.pb1.stats} />
+                      <HistoricalBasketSignalChart
+                        spread={basketData.pb1.spread}
+                        premium={basketSignals.pb1.premium}
+                        signal={basketSignals.pb1.signal}
+                        threshold={basketThreshold}
+                        markers={basketSignals.pb1.markers}
+                        label={`PB1 · spread + premium(EMA${basketWindow}) + signal · T=±${basketThreshold}`}
+                        height={280}
                         xPlotLines={xPlotLines}
                         syncKey={HISTORICAL_SYNC_KEY}
                         resetSignal={resetSignal}
                       />
-                    );
-                  }
-                  return null;
-                })}
+                    </div>
+                  )}
+                  {basketData.pb2 && basketSignals.pb2 && (
+                    <div>
+                      <BasketStatsStrip label="PB2" stats={basketSignals.pb2.stats} />
+                      <HistoricalBasketSignalChart
+                        spread={basketData.pb2.spread}
+                        premium={basketSignals.pb2.premium}
+                        signal={basketSignals.pb2.signal}
+                        threshold={basketThreshold}
+                        markers={basketSignals.pb2.markers}
+                        label={`PB2 · spread + premium(EMA${basketWindow}) + signal · T=±${basketThreshold}`}
+                        height={280}
+                        xPlotLines={xPlotLines}
+                        syncKey={HISTORICAL_SYNC_KEY}
+                        resetSignal={resetSignal}
+                      />
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+            {visibleGlobalCharts.includes("options") && optionsData && (
+              <div className="grid grid-cols-1 gap-3 mt-3">
+                <HistoricalOptionsChart
+                  series={optionsData.voucherSeries}
+                  label="Vouchers · mid price"
+                  height={260}
+                  xPlotLines={xPlotLines}
+                  syncKey={HISTORICAL_SYNC_KEY}
+                  resetSignal={resetSignal}
+                />
+                {optionsData.hasUnderlying && optionsData.moneynessSeries.length > 0 && (
+                  <HistoricalOptionsChart
+                    series={optionsData.moneynessSeries}
+                    label="Vouchers · moneyness (underlying − strike)"
+                    height={220}
+                    xPlotLines={xPlotLines}
+                    syncKey={HISTORICAL_SYNC_KEY}
+                    resetSignal={resetSignal}
+                  />
+                )}
               </div>
             )}
             </div>
@@ -847,6 +1024,56 @@ export default function HistoricalView({ active }: Props) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+type BasketStats = {
+  entries: number;
+  pnl: number;
+  avgHold: number | null;
+  wins: number;
+  losses: number;
+};
+
+function BasketStatsStrip({ label, stats }: { label: string; stats: BasketStats }) {
+  const pnlColor =
+    stats.pnl > 0 ? "#4ade80" : stats.pnl < 0 ? "#f87171" : "#d4d4d4";
+  const closed = stats.wins + stats.losses;
+  const winRate = closed > 0 ? (stats.wins / closed) * 100 : null;
+  return (
+    <div className="flex items-center gap-4 px-2.5 py-1 text-[10px] font-mono text-neutral-400 border border-neutral-700/60 border-b-0 bg-[#2a2d31]">
+      <span className="text-neutral-200 font-semibold text-[11px]">{label}</span>
+      <span>
+        Entries <span className="text-neutral-200">{stats.entries}</span>
+      </span>
+      <span>
+        Closed <span className="text-neutral-200">{closed}</span>
+      </span>
+      <span>
+        Wins <span className="text-neutral-200">{stats.wins}</span>
+      </span>
+      <span>
+        Losses <span className="text-neutral-200">{stats.losses}</span>
+      </span>
+      <span>
+        Win rate{" "}
+        <span className="text-neutral-200">
+          {winRate === null ? "-" : `${winRate.toFixed(0)}%`}
+        </span>
+      </span>
+      <span>
+        Avg hold{" "}
+        <span className="text-neutral-200">
+          {stats.avgHold === null ? "-" : `${Math.round(stats.avgHold)}ts`}
+        </span>
+      </span>
+      <span className="ml-auto">
+        Sim PnL{" "}
+        <span style={{ color: pnlColor }}>
+          {stats.pnl > 0 ? "+" : ""}
+          {stats.pnl.toFixed(1)}
+        </span>
+      </span>
     </div>
   );
 }

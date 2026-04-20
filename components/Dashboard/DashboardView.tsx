@@ -112,6 +112,7 @@ export default function DashboardView({
   const setInfoOpen = onInfoOpenChange;
   const [resetSignal, setResetSignal] = useState(0);
   const [hoveredTime, setHoveredTime] = useState<number | null>(null);
+  const [zoomRange, setZoomRange] = useState<{ min: number; max: number } | null>(null);
   const [normalizer, setNormalizer] = useState<Normalizer>("none");
   const [spreadType, setSpreadType] = useState<SpreadType | "off">("off");
   const [volumeType, setVolumeType] = useState<VolumeType | "off">("off");
@@ -287,6 +288,7 @@ export default function DashboardView({
                 resetSignal={resetSignal}
                 onResetRequest={() => setResetSignal((n) => n + 1)}
                 onHoverTime={setHoveredTime}
+                onXRangeChange={setZoomRange}
               />
               {visiblePanels.pnl && (
                 <DashboardUPlotPanelChart
@@ -385,6 +387,7 @@ export default function DashboardView({
                 pnlStats={pnlStats}
                 skippedPnlTicks={pnlData.skipped}
                 hoveredTime={hoveredTime}
+                zoomRange={zoomRange}
               />
               </div>
             )}
