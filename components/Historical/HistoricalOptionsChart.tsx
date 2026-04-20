@@ -12,6 +12,7 @@ import {
 } from "@/lib/uplotPlugins";
 import {
   makeXPlotLinesDrawHook,
+  makeYPlotLinesDrawHook,
   computeYRange,
   darkAxes,
   XPlotLine,
@@ -31,6 +32,7 @@ type Props = {
   resetSignal?: number;
   xPlotLines?: XPlotLine[];
   formatValue?: (v: number) => string;
+  zeroLineColor?: string;
 };
 
 export default function HistoricalOptionsChart({
@@ -41,6 +43,7 @@ export default function HistoricalOptionsChart({
   resetSignal = 0,
   xPlotLines,
   formatValue,
+  zeroLineColor,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
@@ -51,6 +54,8 @@ export default function HistoricalOptionsChart({
   formatValueRef.current = formatValue;
   const seriesRef = useRef(series);
   seriesRef.current = series;
+  const zeroLineColorRef = useRef(zeroLineColor);
+  zeroLineColorRef.current = zeroLineColor;
 
   const hasAnyData = series.length > 0 && series.some((s) => s.data.length > 0);
 
@@ -82,6 +87,11 @@ export default function HistoricalOptionsChart({
     if (!hasAnyData) return;
 
     const drawXPlotLines = makeXPlotLinesDrawHook(() => xPlotLinesRef.current);
+    const drawZeroLine = makeYPlotLinesDrawHook(() => {
+      const c = zeroLineColorRef.current;
+      if (!c) return [];
+      return [{ value: 0, color: c, dashed: true }];
+    });
 
     const uSeries: Options["series"] = [{}];
     for (const s of seriesRef.current) {
@@ -111,7 +121,7 @@ export default function HistoricalOptionsChart({
       scales: { x: { time: false }, y: { auto: true } },
       axes: darkAxes(),
       hooks: {
-        draw: [drawXPlotLines],
+        draw: [drawZeroLine, drawXPlotLines],
         setCursor: [
           (u) => {
             const tt = tooltipRef.current;
@@ -187,17 +197,28 @@ export default function HistoricalOptionsChart({
     };
   }, [height, syncKey, seriesCount, hasAnyData]);
 
+  const lastDataSigRef = useRef<string>("");
+
   useEffect(() => {
     const plot = plotRef.current;
     if (!plot) return;
     plot.setData(alignedData, false);
-    const arrays: (number | null)[][] = [];
-    for (let s = 1; s < alignedData.length; s++) {
-      arrays.push(alignedData[s] as (number | null)[]);
+    const xs = alignedData[0] as number[] | undefined;
+    const sig = xs && xs.length > 0
+      ? `${xs.length}:${xs[0]}:${xs[xs.length - 1]}`
+      : "empty";
+    if (sig !== lastDataSigRef.current) {
+      lastDataSigRef.current = sig;
+      const arrays: (number | null)[][] = [];
+      for (let s = 1; s < alignedData.length; s++) {
+        arrays.push(alignedData[s] as (number | null)[]);
+      }
+      const r = computeYRange(arrays);
+      if (r) plot.setScale("y", { min: r.min, max: r.max });
+      else plot.redraw();
+    } else {
+      plot.redraw();
     }
-    const r = computeYRange(arrays);
-    if (r) plot.setScale("y", { min: r.min, max: r.max });
-    else plot.redraw();
   }, [alignedData]);
 
   useEffect(() => {

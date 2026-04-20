@@ -11,6 +11,8 @@ import HistoricalPriceChart from "@/components/Historical/HistoricalPriceChart";
 import HistoricalLineChart from "@/components/Historical/HistoricalLineChart";
 import HistoricalOptionsChart, { OptionsSeries } from "@/components/Historical/HistoricalOptionsChart";
 import HistoricalBasketSignalChart, { SignalMarker } from "@/components/Historical/HistoricalBasketSignalChart";
+import HistoricalSmileScatterChart, { SmilePoint, SmileFitOverlay } from "@/components/Historical/HistoricalSmileScatterChart";
+import { bsCall, impliedVol, fitParabola, evalParabola, ParabolaFit } from "@/lib/optionsMath";
 import MultiSelectDropdown from "@/components/MultiSelectDropdown";
 import HistoricalRightPanel from "@/components/Historical/HistoricalRightPanel";
 
@@ -82,6 +84,11 @@ export default function HistoricalView({ active }: Props) {
   const [totalHistDays, setTotalHistDays] = useState(0);
   const [basketWindow, setBasketWindow] = useState(200);
   const [basketThreshold, setBasketThreshold] = useState(50);
+  const [optionsExtrinsicFloor, setOptionsExtrinsicFloor] = useState(0.5);
+  const [optionsOverlaysOn, setOptionsOverlaysOn] = useState(true);
+  const [optionsStrikesOn, setOptionsStrikesOn] = useState<Set<number>>(
+    () => new Set([9500, 9750, 10000, 10250, 10500])
+  );
 
   useEffect(() => {
     try {
@@ -569,6 +576,232 @@ export default function HistoricalView({ active }: Props) {
     return { voucherSeries, moneynessSeries, hasUnderlying };
   }, [loadedData]);
 
+  const VOUCHER_STRIKE_COLORS: Record<number, string> = {
+    9500: "#60a5fa",
+    9750: "#22d3ee",
+    10000: "#a3e635",
+    10250: "#f59e0b",
+    10500: "#f87171",
+  };
+
+  const optionsSignalData = useMemo(() => {
+    if (!loadedData) return null;
+    if (!optionsData) return null;
+    if (!optionsData.hasUnderlying) return null;
+
+    const voucherRe = /^VOLCANIC_ROCK_VOUCHER_(\d+)$/;
+    const strikesByProduct = new Map<string, number>();
+    for (const p of loadedData.products) {
+      const m = p.match(voucherRe);
+      if (m) strikesByProduct.set(p, Number(m[1]));
+    }
+    if (strikesByProduct.size === 0) return null;
+
+    const round = selectedRound ?? 3;
+    const tteAtStart = round === 3 ? 7.0 : round === 4 ? 3.0 : round === 5 ? 2.0 : 7.0;
+    const TICKS_PER_DAY = 1_000_000;
+    const tteDays = (ts: number): number => {
+      const daysUsed = ts / TICKS_PER_DAY;
+      return Math.max(tteAtStart - daysUsed, 0);
+    };
+
+    const computeWallBidAsk = (r: ActivityRow): { bid: number; ask: number } | null => {
+      const bidPs = [r.bidPrice1, r.bidPrice2, r.bidPrice3];
+      const bidVs = [r.bidVolume1, r.bidVolume2, r.bidVolume3];
+      const askPs = [r.askPrice1, r.askPrice2, r.askPrice3];
+      const askVs = [r.askVolume1, r.askVolume2, r.askVolume3];
+      let bestBidP: number | null = null;
+      let bestBidV = -1;
+      for (let i = 0; i < 3; i++) {
+        const p = bidPs[i];
+        const v = bidVs[i];
+        if (p === null || v === null) continue;
+        if (v > bestBidV) {
+          bestBidP = p;
+          bestBidV = v;
+        }
+      }
+      let bestAskP: number | null = null;
+      let bestAskV = -1;
+      for (let i = 0; i < 3; i++) {
+        const p = askPs[i];
+        const v = askVs[i];
+        if (p === null || v === null) continue;
+        if (v > bestAskV) {
+          bestAskP = p;
+          bestAskV = v;
+        }
+      }
+      if (bestBidP === null || bestAskP === null) return null;
+      return { bid: bestBidP, ask: bestAskP };
+    };
+
+    const byTsUnderlying = new Map<number, number>();
+    const byTsVoucher = new Map<number, Map<number, { bid: number; ask: number; mid: number }>>();
+
+    for (const r of loadedData.activities) {
+      const wb = computeWallBidAsk(r);
+      if (wb === null) continue;
+      const wm = (wb.bid + wb.ask) / 2;
+      if (r.product === "VOLCANIC_ROCK") {
+        byTsUnderlying.set(r.timestamp, wm);
+        continue;
+      }
+      const strike = strikesByProduct.get(r.product);
+      if (strike === undefined) continue;
+      let m = byTsVoucher.get(r.timestamp);
+      if (!m) {
+        m = new Map();
+        byTsVoucher.set(r.timestamp, m);
+      }
+      m.set(strike, { bid: wb.bid, ask: wb.ask, mid: wm });
+    }
+
+    type Obs = {
+      ts: number;
+      strike: number;
+      tte: number;
+      S: number;
+      voucherMid: number;
+      voucherBid: number;
+      voucherAsk: number;
+      moneyness: number;
+      iv: number;
+    };
+    const observations: Obs[] = [];
+    const timestamps = Array.from(byTsUnderlying.keys()).sort((a, b) => a - b);
+    for (const ts of timestamps) {
+      const S = byTsUnderlying.get(ts);
+      if (S === undefined || S <= 0) continue;
+      const vMap = byTsVoucher.get(ts);
+      if (!vMap) continue;
+      const T = tteDays(ts);
+      if (T <= 0) continue;
+      for (const [strike, vq] of vMap.entries()) {
+        const iv = impliedVol(vq.mid, S, strike, T, optionsExtrinsicFloor);
+        if (iv === null) continue;
+        observations.push({
+          ts,
+          strike,
+          tte: T,
+          S,
+          voucherMid: vq.mid,
+          voucherBid: vq.bid,
+          voucherAsk: vq.ask,
+          moneyness: Math.log(S / strike),
+          iv,
+        });
+      }
+    }
+
+    const xs = observations.map((o) => o.moneyness);
+    const ys = observations.map((o) => o.iv);
+    const fit = fitParabola(xs, ys);
+    if (!fit) {
+      return {
+        smilePoints: [] as SmilePoint[],
+        smileFit: null,
+        fitOverlay: null,
+        ivResidualSeries: [] as OptionsSeries[],
+        priceResidualSeries: [] as OptionsSeries[],
+        marketVsFairByStrike: [] as {
+          strike: number;
+          bid: { time: number; value: number }[];
+          ask: { time: number; value: number }[];
+          fair: { time: number; value: number }[];
+          bidNorm: { time: number; value: number }[];
+          askNorm: { time: number; value: number }[];
+        }[],
+        observationCount: 0,
+        fitCoefficients: null as ParabolaFit | null,
+      };
+    }
+
+    const sortedStrikes = Array.from(new Set(observations.map((o) => o.strike))).sort((a, b) => a - b);
+    const ivResidualByStrike = new Map<number, { time: number; value: number }[]>();
+    const priceResidualByStrike = new Map<number, { time: number; value: number }[]>();
+    const bidByStrike = new Map<number, { time: number; value: number }[]>();
+    const askByStrike = new Map<number, { time: number; value: number }[]>();
+    const fairByStrike = new Map<number, { time: number; value: number }[]>();
+    const bidNormByStrike = new Map<number, { time: number; value: number }[]>();
+    const askNormByStrike = new Map<number, { time: number; value: number }[]>();
+    for (const K of sortedStrikes) {
+      ivResidualByStrike.set(K, []);
+      priceResidualByStrike.set(K, []);
+      bidByStrike.set(K, []);
+      askByStrike.set(K, []);
+      fairByStrike.set(K, []);
+      bidNormByStrike.set(K, []);
+      askNormByStrike.set(K, []);
+    }
+
+    const smilePoints: SmilePoint[] = [];
+    for (const o of observations) {
+      const ivFit = evalParabola(fit, o.moneyness);
+      const fairPrice = bsCall(o.S, o.strike, o.tte, ivFit);
+      const ivResidual = o.iv - ivFit;
+      const priceResidual = o.voucherMid - fairPrice;
+      ivResidualByStrike.get(o.strike)!.push({ time: o.ts, value: ivResidual });
+      priceResidualByStrike.get(o.strike)!.push({ time: o.ts, value: priceResidual });
+      bidByStrike.get(o.strike)!.push({ time: o.ts, value: o.voucherBid });
+      askByStrike.get(o.strike)!.push({ time: o.ts, value: o.voucherAsk });
+      fairByStrike.get(o.strike)!.push({ time: o.ts, value: fairPrice });
+      bidNormByStrike.get(o.strike)!.push({ time: o.ts, value: o.voucherBid - fairPrice });
+      askNormByStrike.get(o.strike)!.push({ time: o.ts, value: o.voucherAsk - fairPrice });
+      smilePoints.push({ moneyness: o.moneyness, iv: o.iv, strike: o.strike });
+    }
+
+    let minM = Infinity;
+    let maxM = -Infinity;
+    for (const p of smilePoints) {
+      if (p.moneyness < minM) minM = p.moneyness;
+      if (p.moneyness > maxM) maxM = p.moneyness;
+    }
+    let fitOverlay: SmileFitOverlay | null = null;
+    if (isFinite(minM) && isFinite(maxM) && maxM > minM) {
+      const N_OVERLAY = 200;
+      const xsO: number[] = [];
+      const ysO: number[] = [];
+      const step = (maxM - minM) / (N_OVERLAY - 1);
+      for (let i = 0; i < N_OVERLAY; i++) {
+        const x = minM + step * i;
+        xsO.push(x);
+        ysO.push(evalParabola(fit, x));
+      }
+      fitOverlay = { xs: xsO, ys: ysO };
+    }
+
+    const ivResidualSeries: OptionsSeries[] = sortedStrikes.map((K) => ({
+      label: `K=${K}`,
+      color: VOUCHER_STRIKE_COLORS[K] ?? "#d4d4d4",
+      data: ivResidualByStrike.get(K) ?? [],
+    }));
+    const priceResidualSeries: OptionsSeries[] = sortedStrikes.map((K) => ({
+      label: `K=${K}`,
+      color: VOUCHER_STRIKE_COLORS[K] ?? "#d4d4d4",
+      data: priceResidualByStrike.get(K) ?? [],
+    }));
+    const marketVsFairByStrike = sortedStrikes.map((K) => ({
+      strike: K,
+      bid: bidByStrike.get(K) ?? [],
+      ask: askByStrike.get(K) ?? [],
+      fair: fairByStrike.get(K) ?? [],
+      bidNorm: bidNormByStrike.get(K) ?? [],
+      askNorm: askNormByStrike.get(K) ?? [],
+    }));
+
+    return {
+      smilePoints,
+      smileFit: fit,
+      fitOverlay,
+      ivResidualSeries,
+      priceResidualSeries,
+      marketVsFairByStrike,
+      observationCount: observations.length,
+      fitCoefficients: fit,
+    };
+  }, [loadedData, optionsData, optionsExtrinsicFloor, selectedRound]);
+
   const isChartAvailable = (id: ChartId): boolean => {
     if (id === "basket") return basketData !== null;
     if (id === "options") return optionsData !== null;
@@ -978,27 +1211,162 @@ export default function HistoricalView({ active }: Props) {
               </>
             )}
 
-            {visibleGlobalCharts.includes("options") && optionsData && (
-              <div className="grid grid-cols-1 gap-3 mt-3">
-                <HistoricalOptionsChart
-                  series={optionsData.voucherSeries}
-                  label="Vouchers · mid price"
-                  height={260}
-                  xPlotLines={xPlotLines}
-                  syncKey={HISTORICAL_SYNC_KEY}
-                  resetSignal={resetSignal}
-                />
-                {optionsData.hasUnderlying && optionsData.moneynessSeries.length > 0 && (
-                  <HistoricalOptionsChart
-                    series={optionsData.moneynessSeries}
-                    label="Vouchers · moneyness (underlying − strike)"
-                    height={220}
-                    xPlotLines={xPlotLines}
-                    syncKey={HISTORICAL_SYNC_KEY}
-                    resetSignal={resetSignal}
-                  />
-                )}
-              </div>
+            {visibleGlobalCharts.includes("options") && optionsData && optionsSignalData && (
+              <>
+                <div className="mt-3 mb-2 flex items-center gap-3 text-[10px] text-neutral-500 font-mono border border-neutral-700/60 bg-[#22252a] px-2.5 py-1.5 flex-wrap">
+                  <span className="text-neutral-300 font-semibold uppercase tracking-wider text-[9px]">
+                    Options
+                  </span>
+                  <span>
+                    vouchers = <span className="text-neutral-300">VOLCANIC_ROCK_VOUCHER_{"{K}"}</span>
+                  </span>
+                  <span className="text-neutral-700">|</span>
+                  <span>
+                    strikes: <span className="text-neutral-300">9500 / 9750 / 10000 / 10250 / 10500</span>
+                  </span>
+                  {optionsSignalData.fitCoefficients && (
+                    <>
+                      <span className="text-neutral-700">|</span>
+                      <span>
+                        fit:{" "}
+                        <span className="text-neutral-300">
+                          {optionsSignalData.fitCoefficients.a.toFixed(3)}·m² +{" "}
+                          {optionsSignalData.fitCoefficients.b.toFixed(4)}·m +{" "}
+                          {optionsSignalData.fitCoefficients.c.toFixed(4)}
+                        </span>
+                      </span>
+                      <span className="text-neutral-700">|</span>
+                      <span>
+                        n = <span className="text-neutral-300">{optionsSignalData.observationCount.toLocaleString()}</span>
+                      </span>
+                    </>
+                  )}
+                  <span className="text-neutral-700 mx-1">||</span>
+                  <label className="flex items-center gap-1.5">
+                    <span className="text-neutral-400">Extrinsic floor</span>
+                    <input
+                      type="number"
+                      value={optionsExtrinsicFloor}
+                      min={0}
+                      step={0.1}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        if (Number.isFinite(v) && v >= 0) setOptionsExtrinsicFloor(v);
+                      }}
+                      className="w-16 border border-neutral-600 bg-[#1f2125] text-neutral-200 px-1.5 py-0.5 text-[10px] focus:border-neutral-300 focus:outline-none"
+                    />
+                  </label>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap mb-3 pb-2 border-b border-neutral-700">
+                  <span className="text-neutral-400 text-xs">Show</span>
+                  <button
+                    onClick={() => setOptionsOverlaysOn((v) => !v)}
+                    className={`border px-2 py-1 text-[11px] transition-colors ${
+                      optionsOverlaysOn
+                        ? "border-neutral-300 bg-neutral-700 text-neutral-100"
+                        : "border-neutral-600 bg-[#2a2d31] text-neutral-500 hover:text-neutral-200"
+                    }`}
+                  >
+                    Overlays
+                  </button>
+                  <span className="text-neutral-600 mx-1">|</span>
+                  {[9500, 9750, 10000, 10250, 10500].map((K) => {
+                    const isOn = optionsStrikesOn.has(K);
+                    return (
+                      <button
+                        key={K}
+                        onClick={() =>
+                          setOptionsStrikesOn((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(K)) next.delete(K);
+                            else next.add(K);
+                            return next;
+                          })
+                        }
+                        className={`border px-2 py-1 text-[11px] transition-colors ${
+                          isOn
+                            ? "border-neutral-300 bg-neutral-700 text-neutral-100"
+                            : "border-neutral-600 bg-[#2a2d31] text-neutral-500 hover:text-neutral-200"
+                        }`}
+                        style={isOn ? { color: VOUCHER_STRIKE_COLORS[K] } : {}}
+                      >
+                        K={K}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="grid grid-cols-1 gap-3">
+                  {optionsOverlaysOn && (
+                    <>
+                      <HistoricalSmileScatterChart
+                        points={optionsSignalData.smilePoints}
+                        fit={optionsSignalData.fitOverlay}
+                        strikeColors={VOUCHER_STRIKE_COLORS}
+                        label="Volatility smile · IV vs log-moneyness (wall-mid)"
+                        height={300}
+                        fitLabel="parabola fit"
+                      />
+                      {optionsSignalData.ivResidualSeries.length > 0 && (
+                        <HistoricalOptionsChart
+                          series={optionsSignalData.ivResidualSeries}
+                          label="IV residuals · observed IV − fit (v − v̂)"
+                          height={220}
+                          xPlotLines={xPlotLines}
+                          syncKey={HISTORICAL_SYNC_KEY}
+                          resetSignal={resetSignal}
+                          formatValue={(v) => v.toFixed(5)}
+                        />
+                      )}
+                      {optionsSignalData.priceResidualSeries.length > 0 && (
+                        <HistoricalOptionsChart
+                          series={optionsSignalData.priceResidualSeries}
+                          label="Price residuals · market − BS(v̂) [SeaShells]"
+                          height={220}
+                          xPlotLines={xPlotLines}
+                          syncKey={HISTORICAL_SYNC_KEY}
+                          resetSignal={resetSignal}
+                          formatValue={(v) => v.toFixed(2)}
+                        />
+                      )}
+                    </>
+                  )}
+                  {optionsSignalData.marketVsFairByStrike
+                    .filter((entry) => optionsStrikesOn.has(entry.strike))
+                    .map((entry) => {
+                    const rawSeries: OptionsSeries[] = [
+                      { label: "bid", color: "#4ade80", data: entry.bid },
+                      { label: "ask", color: "#f87171", data: entry.ask },
+                      { label: "fair", color: "#f97316", data: entry.fair },
+                    ];
+                    const normSeries: OptionsSeries[] = [
+                      { label: "bid − fair", color: "#4ade80", data: entry.bidNorm },
+                      { label: "ask − fair", color: "#f87171", data: entry.askNorm },
+                    ];
+                    return (
+                      <div key={`voucher-${entry.strike}`} className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                        <HistoricalOptionsChart
+                          series={rawSeries}
+                          label={`K=${entry.strike} · wall-bid / wall-ask / BS-fair`}
+                          height={220}
+                          xPlotLines={xPlotLines}
+                          syncKey={HISTORICAL_SYNC_KEY}
+                          resetSignal={resetSignal}
+                        />
+                        <HistoricalOptionsChart
+                          series={normSeries}
+                          label={`K=${entry.strike} · normalized (bid/ask minus fair, fair = 0)`}
+                          height={220}
+                          xPlotLines={xPlotLines}
+                          syncKey={HISTORICAL_SYNC_KEY}
+                          resetSignal={resetSignal}
+                          formatValue={(v) => v.toFixed(2)}
+                          zeroLineColor="#f97316"
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
             )}
             </div>
             {showPanel && (
